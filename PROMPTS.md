@@ -97,3 +97,7 @@
 
 > [14:45:20 (UTC-04:00)] yes, commit
 
+> [14:48:22 (UTC-04:00)] does deploying to cloudflare or calling llama going to cost me money? we don't really need to deploy to a real cloud D1 if the interviewer can init the local D1 easily, right?
+
+> [14:52:23 (UTC-04:00)] ok, push. and how does this project connect to my free account? using the cf cli?
+
