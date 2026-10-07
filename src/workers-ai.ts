@@ -1,9 +1,10 @@
 /**
- * Workers AI streams Llama 3.3 chunks in two formats at once: the native
- * `response` field and the OpenAI-style `choices[0].delta.content`.
- * workers-ai-provider (3.x and 4.0) emits text from both, so every token
- * reaches the chat twice. This wrapper drops the native copy when it matches
- * the OpenAI delta, before the provider parses the stream.
+ * Workers AI streams Llama 3.3 chunks in two formats at once: native fields
+ * (`response`, top-level `tool_calls`) and the OpenAI-style
+ * `choices[0].delta`. workers-ai-provider (3.x and 4.0) reads both, so every
+ * text token reaches the chat twice and tool-call arguments are interleaved
+ * into invalid JSON. This wrapper drops the native copy whenever the OpenAI
+ * delta is present, before the provider parses the stream.
  */
 export function withDedupedStreamText(ai: Ai): Ai {
   return new Proxy(ai, {
@@ -55,19 +56,33 @@ function rewriteLines(text: string): string {
       if (!data.startsWith("{")) return line;
       let event: {
         response?: unknown;
-        choices?: { delta?: { content?: unknown } }[];
+        tool_calls?: unknown;
+        choices?: { delta?: { content?: unknown; tool_calls?: unknown } }[];
       };
       try {
         event = JSON.parse(data);
       } catch {
         return line;
       }
-      const content = event.choices?.[0]?.delta?.content;
-      if (typeof content !== "string" || event.response !== content) {
-        return line;
+      const delta = event.choices?.[0]?.delta;
+      let changed = false;
+      // Compared loosely on purpose: numeric tokens arrive as JSON numbers in
+      // `response` (5) but as strings in the delta ("5").
+      if (typeof delta?.content === "string" && "response" in event) {
+        delete event.response;
+        changed = true;
       }
-      delete event.response;
-      return `data: ${JSON.stringify(event)}`;
+      // The delta's tool calls are complete (id, index, string arguments);
+      // the top-level copy repeats them and sometimes turns arguments into numbers.
+      if (
+        Array.isArray(delta?.tool_calls) &&
+        delta.tool_calls.length > 0 &&
+        "tool_calls" in event
+      ) {
+        delete event.tool_calls;
+        changed = true;
+      }
+      return changed ? `data: ${JSON.stringify(event)}` : line;
     })
     .join("\n");
 }

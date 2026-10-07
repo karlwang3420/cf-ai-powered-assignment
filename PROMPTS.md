@@ -83,3 +83,17 @@
 
 > [01:39:05 (UTC-04:00)] commit and push
 
+> [13:25:02 (UTC-04:00)] why choose a D1 for the billing single source of truth? can it be deployed locally?
+
+> [13:27:50 (UTC-04:00)] what's the difference between D1 and regular local SQLite?
+
+> [13:31:06 (UTC-04:00)] ok, sounds good. implement
+
+> [13:49:31 (UTC-04:00)] prepare local testing
+
+> [13:58:14 (UTC-04:00)] i ran setup, how do i see the UI
+
+> [14:05:36 (UTC-04:00)] ok, then the next step
+
+> [14:45:20 (UTC-04:00)] yes, commit
+

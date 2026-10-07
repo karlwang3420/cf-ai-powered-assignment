@@ -5,11 +5,28 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
+  // Shared billing database, the source of truth for every customer. Local
+  // dev uses a local SQLite copy; `wrangler deploy` provisions the real one.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "billing",
+      "migrations_dir": "migrations"
+    }
+  ],
   "assets": {
     "directory": "./public",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    "run_worker_first": ["/agents/*", "/api/*"]
   },
+  // Invoice runs: open draft, finalize, reconcile, each step retried
+  "workflows": [
+    {
+      "name": "invoice-workflow",
+      "binding": "INVOICE_WORKFLOW",
+      "class_name": "InvoiceWorkflow"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

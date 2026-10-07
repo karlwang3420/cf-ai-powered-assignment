@@ -25,13 +25,18 @@ test("drops the native response copy when it duplicates the OpenAI delta", async
   });
 });
 
-test("keeps native-only, mismatched, and non-JSON events unchanged", async () => {
-  const native = event({ response: "", usage: { total_tokens: 45 } });
-  const mismatch = event({
-    choices: [{ delta: { content: "a" } }],
-    response: "b"
+test("drops numeric native copies of numeric tokens", async () => {
+  const out = await rewrite([
+    event({ choices: [{ delta: { content: "5" } }], response: 5 })
+  ]);
+  assert.deepEqual(JSON.parse(out.trim().slice(5)), {
+    choices: [{ delta: { content: "5" } }]
   });
-  const input = native + mismatch + "data: [DONE]\n\n";
+});
+
+test("keeps native-only and non-JSON events unchanged", async () => {
+  const native = event({ response: "", usage: { total_tokens: 45 } });
+  const input = native + "data: [DONE]\n\n";
   assert.equal(await rewrite([input]), input);
 });
 
@@ -88,4 +93,24 @@ test("binding wrapper only rewrites streams and preserves other members", async 
   assert.ok(!streamed.includes('"response"'));
   assert.equal(calls[0].self, binding);
   assert.equal(ai.gateway(), "real");
+});
+
+test("drops top-level tool calls that duplicate the OpenAI delta", async () => {
+  const delta = [{ function: { arguments: "202" }, index: 0 }];
+  const out = await rewrite([
+    event({
+      tool_calls: [{ arguments: 202 }],
+      choices: [{ delta: { tool_calls: delta } }]
+    })
+  ]);
+  assert.deepEqual(JSON.parse(out.trim().slice(5)), {
+    choices: [{ delta: { tool_calls: delta } }]
+  });
+});
+
+test("keeps native-only tool calls when the delta has none", async () => {
+  const input =
+    event({ tool_calls: [{ name: "getInvoice", arguments: "{}" }] }) +
+    event({ tool_calls: [], choices: [{ delta: {} }] });
+  assert.equal(await rewrite([input]), input);
 });

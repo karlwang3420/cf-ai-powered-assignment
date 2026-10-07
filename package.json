@@ -11,6 +11,9 @@
     "types": "wrangler types env.d.ts",
     "format": "oxfmt --write .",
     "lint": "oxlint src/",
+    "db:setup": "node scripts/billing.mjs setup",
+    "db:reset": "node scripts/billing.mjs reset",
+    "billing": "node scripts/billing.mjs",
     "test": "node --test tests/*.test.mjs",
     "check": "oxfmt --check . && oxlint src/ && tsc"
   },
@@ -36,6 +39,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "miniflare": "^4.20260721.0",
     "oxfmt": "^0.56.0",
     "oxlint": "^1.71.0",
     "tailwindcss": "^4.3.1",
