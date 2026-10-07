@@ -1,0 +1,10 @@
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    // Runtime types come from `wrangler types` (env.d.ts), not the
+    // @cloudflare/workers-types package.
+    "types": ["node", "vite/client"]
+  },
+  // The Pi prompt-history extension runs in the Pi CLI, not the Worker.
+  "exclude": ["node_modules", ".pi"]
+}

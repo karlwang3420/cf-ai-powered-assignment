@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "billing-assistant",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "BillingAssistant",
+        "name": "BillingAssistant"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["BillingAssistant"],
+      "tag": "v1"
+    }
+  ]
+}
