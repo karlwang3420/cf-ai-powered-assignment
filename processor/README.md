@@ -5,22 +5,35 @@ Object (`ProcessorState`, binding `PROCESSOR_STATE`, singleton `demo-processor`)
 and durable webhook outbox. It has **no merchant D1 binding** and never posts money
 or mutates merchant records. Public demo credentials below are not real secrets.
 
-## Local startup / next-stage wiring
+## Local startup
 
-From the repository root, using the already installed dependencies:
+For the complete demo, follow the [root setup instructions](../README.md#setup).
+From the repository root:
+
+```sh
+npm run db:setup   # stop dev first; preserves existing data
+npm run dev
+```
+
+Vite starts both Workers. The merchant's `PAYMENT_PROCESSOR` binding targets
+`mock-payment-processor`, and the processor's `MERCHANT` binding targets
+`billing-assistant` for signed callbacks. No separate processor process or seed
+command is needed. Both bindings are already configured.
+
+For **standalone processor development only**, with the combined Vite server
+stopped:
 
 ```sh
 npx wrangler dev --config processor/wrangler.jsonc --persist-to processor/.wrangler/state --port 8790
 ```
 
-Start the merchant separately under its existing `billing-assistant` Worker name.
-The processor config already binds `MERCHANT` to that service. Until it is running
-and implements the callback, deliveries retry and eventually remain `exhausted`;
-charge/status endpoints still work. Never delete/reset existing `.wrangler` data.
+This uses separate processor state. Without a separately running merchant,
+callback deliveries retry and eventually remain `exhausted`; charge/status
+endpoints still work. Do not run this alongside the combined Vite app or reset
+merchant state while retaining old processor keys. See [safe isolated demos](../docs/local-testing.md#safe-setup-and-isolation).
 
-The runtime owner must add a merchant service binding, recommended name
-`PAYMENT_PROCESSOR`, targeting `mock-payment-processor`. Requests through that
-binding can use `https://processor.internal` as the origin. They require:
+Merchant requests use the service binding with `https://processor.internal` as
+the origin. Direct standalone requests use `http://localhost:8790`. Both require:
 
 ```text
 Authorization: Bearer demo-only-processor-token-not-a-secret
@@ -29,8 +42,8 @@ Content-Type: application/json  (for request bodies)
 
 The processor config sets `PROCESSOR_TOKEN` to that public fixture and
 `PROCESSOR_WEBHOOK_SECRET` to `demo-only-webhook-hmac-not-a-secret`. Use the latter
-for merchant callback verification. These names belong to processor config; no
-root configs or packages have been changed.
+for merchant callback verification. Root and processor configurations already
+contain their corresponding demo bindings and credentials.
 
 ## Wire contracts
 
@@ -62,11 +75,19 @@ currency: "USD", methodVersion }`. Identifiers are nonempty, at most 200
 | `GET /demo/inspect?invoiceId=<id>`                       | Read-only `{ invoiceId, keyRetention: "indefinite", scenarios, requests, outbox }`; latest 50 requests/100 events, newest first. No progression or delivery side effects. |
 | `POST /demo/outbox/retry`                                | `{ eventId }`; only an `exhausted` delivery can be explicitly resumed. Returns `{ eventId, state: "queued" }`; same event ID/body.                                        |
 
+Additional demo controls (also require the bearer token):
+
+| Method/path         | Contract                                                                                                                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /demo/settle` | `{ invoiceId, outcome: "succeeded" \| "soft_decline" \| "hard_decline" }`; resolves the invoice's latest pending charge, queues its signed webhook, returns `{ invoiceId, charge }`. Returns 409 if there is no pending charge; terminal outcomes cannot be edited. |
+| `POST /demo/reset`  | `{ invoiceId }`; destructively deletes that invoice's keys/charges, outbox and scenario queue, returns `{ invoiceId, reset: true }`. Other invoices are untouched.                                                                                                  |
+
 Inspection request entries contain `{ request, scenario, charge, resolveAt }`;
 `charge` is null for an outage before commit. Outbox entries contain `{ event,
 state, attempts, copiesRemaining, dueAt, deliveredAt, lastError }`. Numeric times
-are epoch milliseconds; event `createdAt` is ISO UTC. No destructive reset or
-terminal-outcome editing endpoint exists.
+are epoch milliseconds; event `createdAt` is ISO UTC. Settlement only resolves
+pending charges; it cannot change a terminal outcome. Reset is a separate,
+destructive exception that forgets the invoice's processor records entirely.
 
 Errors are `{ error: { code, message } }`. Important statuses: 400 invalid input,
 401 unauthenticated, 404 unknown charge/endpoint, 409 `idempotency_conflict` or
@@ -80,10 +101,19 @@ payloads get 400 and cannot mutate the original. A given attempt ID also cannot
 be reused with a different key. Successful replay returns the current outcome
 of the original charge; pending may advance, terminal outcomes never change.
 
-**Retention is indefinite in this demo:** no key expiration, purge, TTL or blind
-key reuse is implemented. There is no expiration race for callers to guess at.
-Changing scenario queues never affects existing keys. Persist merchant attempts
-before sending them, and do not grant new-attempt budgets based on this API.
+**Retention is indefinite during normal operation:** there is no automatic key
+expiration or TTL. Changing scenario queues never affects existing keys. Persist
+merchant attempts before sending them, and do not grant new-attempt budgets
+based on this API.
+
+**Reset is the explicit demo-only retention exception.** Once `/demo/reset`
+deletes an invoice's keys, replaying an old key can create a fresh charge. For
+the combined app, use **Admin → Debug → Reset to unpaid**, not a standalone
+processor reset: the merchant terminates the old Workflow, clears processor
+state first, then resets its own payment records while preserving credits.
+This is not a refund or production recovery operation. An already-in-flight
+webhook is not fenced by reset; wait for active work and deliveries to settle.
+See [reset boundaries](../docs/payment-workflow.md#deliberate-boundaries).
 
 ## Scenarios
 
@@ -98,7 +128,7 @@ supports card-update recovery without changing old outcomes.
 | `outage`                        | First POST durably pins payload/scenario, returns 503 before charge creation. Status is 503 until a same-key POST commits success. That replay does not consume another scenario. |
 | `lost_response`                 | Atomically commits success + outbox, returns 504 **without charge data** once. Same-key replay or status returns the one committed charge.                                        |
 | `pending`                       | Pending charge/event, then success/event after 2 seconds via durable alarm (or a due status/replay observation). Same payment ID, distinct event IDs.                             |
-| `unresolved_pending`            | Pending forever, even after restarts; emits only its initial pending event. No unsafe force-success/decline control.                                                              |
+| `unresolved_pending`            | Stays pending across restarts until `/demo/settle` resolves it. Settlement queues a normal signed terminal event; the merchant is never force-edited.                             |
 | `lost_webhook`                  | Succeeded charge; its durable event is deliberately `dropped` and never sent. Status reconciliation still succeeds.                                                               |
 | `duplicate_webhook`             | Succeeded charge; sends two copies of the **same** durable event/body. Ordinary delivery failure can also cause duplicates.                                                       |
 
@@ -155,5 +185,6 @@ Node tests use fresh `node:sqlite` databases and the importable `Processor` core
 The runtime test bundles the minimal Cloudflare shell with installed esbuild,
 runs real Miniflare SQLite DO alarms and a verifying merchant service Worker,
 and reopens **only its own OS-temp** persistence directory to test restart.
-This is a processor transport integration test, not the later merchant-D1 /
-PaymentWorkflow integration test required by the design.
+This verifies processor transport in isolation. The implemented full merchant-D1 /
+PaymentWorkflow integration matrix is `tests/payment-integration.test.mjs`; see
+[local testing](../docs/local-testing.md#automated-verification-no-ai).

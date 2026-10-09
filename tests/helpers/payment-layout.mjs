@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(read, label) {
@@ -16,7 +17,7 @@ async function until(read, label) {
   }
   throw new Error(`Browser layout timeout: ${label}`);
 }
-export async function checkPaymentLayout(origin) {
+export async function checkPaymentLayout(origin, invoiceId) {
   const browser =
     process.env.PAYMENT_UI_BROWSER ??
     [
@@ -44,7 +45,8 @@ export async function checkPaymentLayout(origin) {
     { stdio: ["ignore", "ignore", "pipe"] }
   );
   let stderr = "",
-    socket;
+    socket,
+    foreignServer;
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
@@ -66,9 +68,12 @@ export async function checkPaymentLayout(origin) {
     });
     let id = 0;
     const pending = new Map();
+    const responses = [];
     socket.addEventListener("message", ({ data }) => {
-      const message = JSON.parse(data),
-        request = pending.get(message.id);
+      const message = JSON.parse(data);
+      if (message.method === "Network.responseReceived")
+        responses.push(message.params.response);
+      const request = pending.get(message.id);
       if (!request) return;
       pending.delete(message.id);
       message.error
@@ -180,7 +185,71 @@ export async function checkPaymentLayout(origin) {
     console.log(
       "PAYMENT_LAYOUT_OK: styled real app; admin dialog tabs + customer view; 390/1280px; light/dark; long customer; no clipped controls/overflow."
     );
+
+    // Real browser form from a different loopback origin: no preflight, no
+    // custom headers, no app confirmation. A paid invoice must remain intact.
+    const paymentUrl = `${origin}/api/payments/${encodeURIComponent(invoiceId)}`;
+    const read = async (url) => {
+      const response = await fetch(url);
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    const before = await read(paymentUrl);
+    const processorBefore = await read(`${paymentUrl}/processor`);
+    assert.equal(before.status, "paid");
+    assert.ok(processorBefore.outbox.every((e) => e.state === "delivered"));
+    const resetUrl = `${paymentUrl}/debug-reset`;
+    foreignServer = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(
+        `<!doctype html><title>Foreign-origin form</title><form method="POST" action="${resetUrl}"><button>Submit</button></form>`
+      );
+    });
+    await new Promise((resolve) =>
+      foreignServer.listen(0, "127.0.0.1", resolve)
+    );
+    const foreignOrigin = `http://localhost:${foreignServer.address().port}`;
+    await send("Network.enable");
+    await send("Page.navigate", { url: foreignOrigin });
+    await until(
+      () => evaluate("document.title === 'Foreign-origin form'"),
+      "foreign page"
+    );
+    assert.equal(await evaluate("location.origin"), foreignOrigin);
+    await evaluate("document.querySelector('form').requestSubmit()");
+    await until(
+      () =>
+        evaluate(
+          `location.href === ${JSON.stringify(resetUrl)} && document.body.innerText.includes('Cross-origin mutations are not allowed')`
+        ),
+      "form rejected"
+    );
+    assert.equal(
+      responses.find((response) => response.url === resetUrl)?.status,
+      403
+    );
+    assert.deepEqual(await read(paymentUrl), before);
+    assert.deepEqual(await read(`${paymentUrl}/processor`), processorBefore);
+
+    // The same browser can still perform an ordinary same-origin UI mutation.
+    await send("Page.navigate", { url: origin });
+    await until(
+      () => evaluate("!!document.querySelector('header')"),
+      "merchant page"
+    );
+    const sameOriginStatus = await evaluate(`fetch('/api/payments/reconcile', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({invoiceId:${JSON.stringify(invoiceId)}})
+    }).then(r=>r.status)`);
+    assert.equal(sameOriginStatus, 200);
+    assert.equal((await read(paymentUrl)).paidCents, before.paidCents);
+    console.log(
+      "PAYMENT_ORIGIN_OK: foreign browser form rejected with 403; merchant/processor records unchanged; same-origin mutation succeeds."
+    );
   } finally {
+    foreignServer?.closeAllConnections();
+    if (foreignServer)
+      await new Promise((resolve) => foreignServer.close(resolve));
     socket?.close();
     child.kill();
     await sleep(700);

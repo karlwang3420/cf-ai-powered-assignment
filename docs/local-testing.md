@@ -62,8 +62,8 @@ npm run types
 npx vite build
 ```
 
-Final reviewed validation: **106/106 tests passed** with the full file set at
-bounded concurrency (about eight minutes on the Windows development machine):
+Latest validation: **119/119 tests passed** with the full file set at bounded
+concurrency (about 90 seconds on the Windows development machine):
 
 ```sh
 node --test --test-concurrency=2 tests/*.test.mjs
@@ -108,7 +108,10 @@ The browser fixture test runs real Chrome/Edge when available (override with
 `PAYMENT_UI_BROWSER`); it may skip elsewhere. The integration harness also
 checks the fully styled real app at 390px and 1280px, light/dark, with a long
 customer name and expanded IDs: no document overflow or clipped header controls.
-It reports `PAYMENT_LAYOUT_OK` or an explicit browser-unavailable skip. The
+It also submits a real cross-origin browser form to the reset endpoint and
+verifies HTTP 403, unchanged paid-invoice/processor records, and successful
+same-origin reconciliation. It reports `PAYMENT_LAYOUT_OK` and
+`PAYMENT_ORIGIN_OK`, or an explicit browser-unavailable skip. The
 integration harness can hold
 its isolated server briefly with `PAYMENT_BROWSER_HOLD_MS=60000` for a local
 `browse` smoke pass; it prints `ISOLATED_PAYMENT_ORIGIN`. Never point that pass

@@ -10,6 +10,7 @@ import {
   issueCredit,
   listCustomers,
   listInvoices,
+  monthPeriod,
   openInvoice,
   reconcile,
   recordUsage
@@ -82,6 +83,40 @@ test("usage ingestion is idempotent and validated", async (t) => {
   const october = await getUsageSummary(db, "cus_acme", "2026-10");
   const requests = october.meters.find((m) => m.meterId === "workers_requests");
   assert.deepEqual([requests.quantity, requests.events], [4_201_000, 7]);
+});
+
+test("month boundaries remain sortable four-digit dates and reject expanded years", async (t) => {
+  assert.deepEqual(monthPeriod("2026-12"), {
+    start: "2026-12-01T00:00:00.000Z",
+    end: "2027-01-01T00:00:00.000Z"
+  });
+  assert.equal(monthPeriod("2000-01").start, "2000-01-01T00:00:00.000Z");
+  assert.equal(monthPeriod("9999-11").end, "9999-12-01T00:00:00.000Z");
+  const db = await database(t);
+  for (const month of [
+    "9999-12",
+    "0000-01",
+    "0099-12",
+    "1999-12",
+    "10000-01"
+  ]) {
+    assert.throws(() => monthPeriod(month), code("invalid"));
+    await assert.rejects(
+      openInvoice(db, "cus_acme", month, NOW),
+      code("invalid")
+    );
+  }
+  for (const month of ["2026-10", "2026-11", "9999-11"]) {
+    await assert.rejects(
+      openInvoice(db, "cus_acme", month, NOW),
+      code("period_open")
+    );
+  }
+  assert.deepEqual(await listInvoices(db, "cus_acme"), []);
+  assert.equal(
+    (await openInvoice(db, "cus_acme", "2026-09", NOW)).status,
+    "draft"
+  );
 });
 
 test("an invoice closes its period to new usage", async (t) => {

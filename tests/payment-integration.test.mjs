@@ -470,7 +470,7 @@ test(
           ([service, count]) => service === worker && count > 0
         )
       );
-    await checkPaymentLayout(origin);
+    await checkPaymentLayout(origin, invoices.success.id);
     // Optional bounded pause solely for browse CLI smoke against this same isolated live app.
     if (process.env.PAYMENT_BROWSER_HOLD_MS)
       await sleep(

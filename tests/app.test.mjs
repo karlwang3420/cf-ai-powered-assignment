@@ -195,6 +195,53 @@ function fakeWorkflow() {
   };
 }
 
+test("API rejects unsupported/future invoice periods before creating a Workflow", async (t) => {
+  const env = { DB: await database(t), INVOICE_WORKFLOW: fakeWorkflow() };
+  for (const [month, expected] of [
+    ["9999-12", 400],
+    ["0099-12", 400],
+    ["9999-11", 409],
+    ["2026-10", 409]
+  ]) {
+    const response = await handleApi(
+      new Request("http://localhost/api/invoice-runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ customerId: "cus_acme", month })
+      }),
+      env,
+      NOW
+    );
+    assert.equal(response.status, expected, month);
+  }
+  assert.deepEqual(env.INVOICE_WORKFLOW.created, []);
+  assert.equal(
+    (await env.DB.prepare("SELECT COUNT(*) AS n FROM invoices").first()).n,
+    0
+  );
+});
+
+test("API origin guard covers invoice creation and preserves same-origin requests", async (t) => {
+  const env = { DB: await database(t), INVOICE_WORKFLOW: fakeWorkflow() };
+  for (const [origin, status] of [
+    ["http://localhost:5191", 403],
+    ["null", 403],
+    ["http://localhost:5173", 202]
+  ]) {
+    const response = await handleApi(
+      new Request("http://localhost:5173/api/invoice-runs", {
+        method: "POST",
+        headers: { Origin: origin, "content-type": "application/json" },
+        body: JSON.stringify({ customerId: "cus_acme", month: "2026-09" })
+      }),
+      env,
+      NOW
+    );
+    assert.equal(response.status, status);
+  }
+  assert.equal(env.INVOICE_WORKFLOW.created.length, 1);
+});
+
 test("API: reads, invoice runs, and error statuses", async (t) => {
   const env = { DB: await database(t), INVOICE_WORKFLOW: fakeWorkflow() };
   const call = async (method, path, body) => {

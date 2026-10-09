@@ -69,7 +69,9 @@ export function paymentNextStep(payment: PaymentCollection): string {
     case "retrying":
       return payment.ownerActive ? "Retry scheduled" : "Ready to retry";
     case "past_due":
-      return "Out of attempts · balance due";
+      return payment.attemptsRemaining === 0
+        ? "Out of attempts · balance due"
+        : "Past due · update card, then reconcile + resume";
     case "open":
       return canCollectPayment(payment)
         ? "Ready to collect"

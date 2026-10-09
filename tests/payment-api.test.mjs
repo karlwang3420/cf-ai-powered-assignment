@@ -298,6 +298,77 @@ test("payment attention API includes prepared reservations and removes them afte
   assert.equal((await call("GET", `/${inv.id}`)).data.needsAttention, 0);
 });
 
+test("foreign-origin mutations are rejected before any financial or processor side effect", async (t) => {
+  const { env, inv, call, send } = await setup(t);
+  await send();
+  const before = await getPaymentCollection(env.DB, inv.id);
+  assert.equal(before.status, "paid");
+  let processorCalls = 0,
+    workflowCalls = 0;
+  env.PAYMENT_PROCESSOR.fetch = async () => {
+    processorCalls++;
+    return Response.json({});
+  };
+  env.PAYMENT_WORKFLOW.get = async () => {
+    workflowCalls++;
+    throw new Error("must not run");
+  };
+  for (const headers of [
+    { Origin: "http://localhost:5191" },
+    { Origin: "https://merchant.test:444" },
+    { Origin: "http://merchant.test" },
+    { Origin: "null" },
+    { Origin: "" },
+    { "Sec-Fetch-Site": "cross-site" }
+  ]) {
+    for (const [method, route] of [
+      ["POST", `/${inv.id}/debug-reset`],
+      ["POST", `/${inv.id}/collect`],
+      ["POST", `/${inv.id}/settle`],
+      ["PUT", `/${inv.id}/scenarios`],
+      ["POST", "/reconcile"],
+      ["POST", "/method"]
+    ]) {
+      const response = await call(method, route, undefined, {
+        "content-type": "application/x-www-form-urlencoded",
+        ...headers
+      });
+      assert.equal(response.status, 403, `${method} ${route}`);
+      assert.equal(response.data.error.code, "forbidden");
+    }
+  }
+  assert.deepEqual(await getPaymentCollection(env.DB, inv.id), before);
+  assert.equal(processorCalls, 0);
+  assert.equal(workflowCalls, 0);
+  for (const headers of [{}, { Origin: "https://merchant.test" }]) {
+    assert.equal(
+      (
+        await call(
+          "POST",
+          "/method",
+          { customerId: "cus_acme", expectedVersion: 1 },
+          headers
+        )
+      ).status,
+      200
+    );
+  }
+});
+
+test("signed webhook is exempt from browser origin checks but still requires authentication", async (t) => {
+  const { call, event, inv } = await setup(t);
+  const raw = JSON.stringify(event);
+  const origin = { Origin: "https://processor.test" };
+  assert.equal((await call("POST", "/webhook", raw, origin)).status, 401);
+  const headers = {
+    ...origin,
+    ...(await signProcessorWebhook(raw, DEMO_WEBHOOK_SECRET))
+  };
+  assert.equal((await call("POST", "/webhook/", raw, headers)).status, 403);
+  assert.equal((await call("POST", "/webhook", raw, headers)).status, 202);
+  assert.equal((await call("GET", `/${inv.id}`)).data.status, "paid");
+});
+
 test("debug reset clears one invoice's payment history atomically, processor first, and keeps others immutable", async (t) => {
   const { env, inv, outcome, call, send } = await setup(t);
   // A second customer's paid invoice must be untouched by the reset.

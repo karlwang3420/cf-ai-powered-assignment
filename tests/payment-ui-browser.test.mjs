@@ -1,7 +1,8 @@
 // Real Chromium + real React controls, deterministic HTTP fixtures; no LLM or user DB.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -373,9 +374,12 @@ test(
       stderr += chunk;
     });
     t.after(async () => {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
       child.kill();
+      await Promise.race([exited, sleep(2000)]);
       await sleep(700);
-      rmSync(profile, {
+      // Async retries let browser/socket shutdown finish while Windows releases locks.
+      await rm(profile, {
         recursive: true,
         force: true,
         maxRetries: 10,

@@ -108,6 +108,21 @@ export async function handleApi(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/")) return null;
+  // Browser forms can POST to loopback without a CORS preflight. Check before
+  // dispatch (including bodyless collect/reset); CLI calls have no Origin.
+  // The exact processor callback authenticates its raw body with HMAC instead.
+  const webhook =
+    request.method === "POST" && url.pathname === "/api/payments/webhook";
+  const origin = request.headers.get("Origin");
+  if (
+    !webhook &&
+    !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+    ((origin !== null && origin !== url.origin) ||
+      (origin === null &&
+        request.headers.get("Sec-Fetch-Site") === "cross-site"))
+  ) {
+    return error(403, "forbidden", "Cross-origin mutations are not allowed");
+  }
   const parts = url.pathname.split("/").slice(2).map(decodeURIComponent);
   const route = `${request.method} ${parts[0]}${parts.length > 1 ? "/:id" : ""}`;
 

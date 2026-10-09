@@ -52,6 +52,15 @@ export function monthPeriod(month: string): { start: string; end: string } {
   if (!match) throw new BillingError("invalid", "month must be YYYY-MM");
   const year = Number(match[1]);
   const index = Number(match[2]) - 1;
+  // Both boundaries must stay in our supported four-digit ISO year range.
+  // Expanded +010000 timestamps sort before ordinary dates in JS and SQL;
+  // years below 100 also have special Date.UTC semantics.
+  if (year < 2000 || (year === 9999 && index === 11)) {
+    throw new BillingError(
+      "invalid",
+      "month must be between 2000-01 and 9999-11"
+    );
+  }
   return {
     start: new Date(Date.UTC(year, index, 1)).toISOString(),
     end: new Date(Date.UTC(year, index + 1, 1)).toISOString()

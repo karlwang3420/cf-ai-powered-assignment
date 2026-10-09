@@ -4,6 +4,7 @@ import { api } from "../src/client-api.ts";
 import {
   canCollectPayment,
   paymentNeedsAttention,
+  paymentNextStep,
   paymentPollDelay,
   pollPaymentRead
 } from "../src/components/payment-state.ts";
@@ -55,6 +56,23 @@ test("payment UI treats reservations and completed Workflow separately from fina
     paymentPollDelay([], [{}]),
     2000,
     "unapplied inbox keeps recovery visible"
+  );
+});
+
+test("past-due guidance distinguishes a card timeout from exhausted attempts", () => {
+  const timeout = {
+    ...collection,
+    status: "past_due",
+    attemptsUsed: 1,
+    attemptsRemaining: 3
+  };
+  assert.equal(
+    paymentNextStep(timeout),
+    "Past due · update card, then reconcile + resume"
+  );
+  assert.equal(
+    paymentNextStep({ ...timeout, attemptsUsed: 4, attemptsRemaining: 0 }),
+    "Out of attempts · balance due"
   );
 });
 

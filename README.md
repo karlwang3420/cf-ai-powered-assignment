@@ -33,7 +33,9 @@ empty; it preserves existing data. Stop dev before running setup or direct-file
 billing CLI commands, especially on Windows.
 
 **Local demo only:** there is no authentication. Keep the app and local Explorer
-private. Payment controls need no AI calls; see [offline, isolated setup](docs/local-testing.md#safe-setup-and-isolation)
+private. Mutating APIs reject foreign browser origins; originless CLI requests
+and HMAC-verified processor callbacks remain supported. This is not authentication.
+Payment controls need no AI calls; see [offline, isolated setup](docs/local-testing.md#safe-setup-and-isolation)
 if you want to run without remote bindings.
 
 ## Quick manual
