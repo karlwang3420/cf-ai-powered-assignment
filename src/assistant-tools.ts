@@ -18,6 +18,8 @@ import {
   listInvoices
 } from "./billing/store.ts";
 
+import { getPaymentCollection } from "./billing/payments.ts";
+
 export const CREDIT_APPROVER = "support (demo UI)";
 
 const month = z
@@ -76,10 +78,10 @@ export function createBillingTools(db: D1Database, customerId: string) {
       execute: ({ month }) =>
         answer(async () => {
           const invoice = await getInvoice(db, invoiceIdFor(customerId, month));
-          const credited = invoice.credits.reduce(
-            (sum, c) => sum + c.amountCents,
-            0
-          );
+          const payment =
+            invoice.status === "finalized"
+              ? await getPaymentCollection(db, invoice.id)
+              : null;
           return {
             month,
             status: invoice.status,
@@ -93,9 +95,40 @@ export function createBillingTools(db: D1Database, customerId: string) {
               reason: c.reason
             })),
             stillCreditable:
-              invoice.totalCents === null
-                ? null
-                : formatCents(invoice.totalCents - credited)
+              payment === null ? null : formatCents(payment.creditableCents)
+          };
+        })
+    }),
+
+    getPaymentState: tool({
+      description:
+        "Read this customer's finalized invoice payment state, bounded attempt budget, correlation IDs and durable timeline. Financial state is authoritative even after a Workflow completes. Reserved money is unresolved, not paid or available for credit. Read only: use the local demo UI for collection, card updates or reconciliation; never infer payment from Workflow completion.",
+      inputSchema: z.object({ month }),
+      execute: ({ month }) =>
+        answer(async () => {
+          const payment = await getPaymentCollection(
+            db,
+            invoiceIdFor(customerId, month)
+          );
+          return {
+            month,
+            invoiceId: payment.invoiceId,
+            status: payment.status,
+            total: formatCents(payment.totalCents),
+            credited: formatCents(payment.creditedCents),
+            paid: formatCents(payment.paidCents),
+            reserved: formatCents(payment.reservedCents),
+            due: formatCents(payment.balanceCents),
+            stillCreditable: formatCents(payment.creditableCents),
+            attemptsUsed: payment.attemptsUsed,
+            attemptsRemaining: payment.attemptsRemaining,
+            workflowId: payment.workflowId,
+            hasConflict: Boolean(payment.hasConflict),
+            attempts: payment.attempts.map(({ amountCents, ...attempt }) => ({
+              ...attempt,
+              amount: formatCents(amountCents)
+            })),
+            timeline: payment.timeline
           };
         })
     }),

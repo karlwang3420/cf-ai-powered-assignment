@@ -1,0 +1,485 @@
+// Real Chromium + real React controls, deterministic HTTP fixtures; no LLM or user DB.
+import assert from "node:assert/strict";
+import test from "node:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { build } from "esbuild";
+
+const browser =
+  process.env.PAYMENT_UI_BROWSER ??
+  [
+    "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome"
+  ].find(existsSync);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function until(fn, label, ms = 12000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await sleep(50);
+  }
+  throw new Error(`Timed out: ${label}`);
+}
+
+async function connect(url) {
+  const socket = new WebSocket(url);
+  await new Promise((resolve, reject) => {
+    socket.addEventListener("open", resolve, { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+  let id = 0;
+  const pending = new Map();
+  socket.addEventListener("message", ({ data }) => {
+    const message = JSON.parse(data);
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    message.error
+      ? request.reject(new Error(JSON.stringify(message.error)))
+      : request.resolve(message.result);
+  });
+  return {
+    socket,
+    send(method, params = {}) {
+      return new Promise((resolve, reject) => {
+        const next = ++id;
+        pending.set(next, { resolve, reject });
+        socket.send(JSON.stringify({ id: next, method, params }));
+      });
+    }
+  };
+}
+
+const base = {
+  invoiceId: "inv_cus_acme_2026-09",
+  customerId: "cus_acme",
+  currency: "USD",
+  status: "open",
+  totalCents: 500,
+  creditedCents: 0,
+  paidCents: 0,
+  reservedCents: 0,
+  balanceCents: 500,
+  creditableCents: 500,
+  attemptsUsed: 0,
+  attemptsRemaining: 4,
+  methodVersion: 1,
+  generation: 0,
+  workflowId: null,
+  ownerId: null,
+  ownerActive: 0,
+  hasConflict: 0,
+  needsAttention: 0,
+  updatedAt: "2026-10-01T00:00:00Z"
+};
+
+function customer(id) {
+  return {
+    customer: {
+      id,
+      name: id === "cus_acme" ? "Acme test account" : "Orbit test account",
+      email: `${id}@example.test`,
+      planName: "Starter",
+      balanceCents: 500
+    },
+    invoices: [
+      {
+        id: `inv_${id}_2026-09`,
+        periodStart: "2026-09-01T00:00:00Z",
+        status: "finalized",
+        totalCents: 500,
+        creditedCents: 0
+      }
+    ],
+    currentUsage: {
+      month: "2026-10",
+      meters: [
+        {
+          meterId: "test",
+          name: "Existing usage",
+          quantity: 42,
+          unit: "requests"
+        }
+      ]
+    },
+    months: [{ month: "2026-09", status: "finalized" }]
+  };
+}
+
+test(
+  "payment controls browser journey: queues, review, inbox recovery, late paid, errors and customer races",
+  { skip: !browser, timeout: 90000 },
+  async (t) => {
+    const bundle = await build({
+      stdin: {
+        contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {BillingPanel} from './src/components/billing-panel'; const root=createRoot(document.getElementById('root')); window.showCustomer=(id)=>root.render(<BillingPanel key={id} customerId={id} refreshKey={0}/>); window.showCustomer('cus_acme');`,
+        resolveDir: process.cwd(),
+        loader: "tsx"
+      },
+      bundle: true,
+      write: false,
+      format: "esm",
+      platform: "browser",
+      jsx: "automatic",
+      define: { "process.env.NODE_ENV": '"development"' }
+    });
+    let payment = { ...base };
+    let inbox = [];
+    let failReconcile = false;
+    let delayReconcile = false;
+    let releaseReconcile;
+    let delayCustomer = null;
+    let releaseCustomer;
+    let queued = [];
+    const calls = [];
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname === "/") {
+        res.setHeader("content-type", "text/html");
+        res.end(
+          '<!doctype html><html><body><div id="root"></div><script type="module" src="/ui.js"></script></body></html>'
+        );
+        return;
+      }
+      if (url.pathname === "/ui.js") {
+        res.setHeader("content-type", "text/javascript");
+        res.end(bundle.outputFiles[0].text);
+        return;
+      }
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = raw ? JSON.parse(raw) : null;
+      calls.push({ path: url.pathname, method: req.method, body });
+      res.setHeader("content-type", "application/json");
+      const send = (value) => res.end(JSON.stringify(value));
+      if (url.pathname.startsWith("/api/customers/")) {
+        const id = url.pathname.split("/").at(-1);
+        if (delayCustomer === id) {
+          delayCustomer = null;
+          await new Promise((resolve) => {
+            releaseCustomer = resolve;
+          });
+        }
+        send(customer(id));
+        return;
+      }
+      if (url.pathname === "/api/payments") {
+        send(
+          url.searchParams.get("customerId") === "cus_acme"
+            ? [payment]
+            : [
+                {
+                  ...base,
+                  customerId: "cus_orbit",
+                  invoiceId: "inv_cus_orbit_2026-09"
+                }
+              ]
+        );
+        return;
+      }
+      if (url.pathname === "/api/payments/inbox") {
+        send(url.searchParams.get("customerId") === "cus_acme" ? inbox : []);
+        return;
+      }
+      if (url.pathname.startsWith("/api/invoices/")) {
+        send({
+          lines: [
+            {
+              lineNo: 1,
+              description: "Existing invoice line",
+              amountCents: 500
+            }
+          ],
+          credits: [
+            {
+              id: "credit-1",
+              reason: "Existing approved credit",
+              approvedBy: "support",
+              amountCents: 100
+            }
+          ]
+        });
+        return;
+      }
+      if (url.pathname.endsWith("/scenarios")) {
+        queued = body.scenarios;
+        send({ invoiceId: payment.invoiceId, scenarios: queued });
+        return;
+      }
+      if (url.pathname.endsWith("/collect")) {
+        payment = {
+          ...payment,
+          status: "needs_review",
+          reservedCents: 500,
+          creditableCents: 0,
+          attemptsUsed: 1,
+          attemptsRemaining: 3,
+          needsAttention: 1,
+          generation: 1,
+          workflowId: "workflow-ended",
+          updatedAt: "2026-10-01T00:00:01Z"
+        };
+        inbox = [
+          {
+            eventId: "inbox-not-applied",
+            outcome: {
+              invoiceId: payment.invoiceId,
+              attemptId: "attempt-1",
+              status: "succeeded"
+            }
+          }
+        ];
+        send({ id: payment.workflowId, started: true, collection: payment });
+        return;
+      }
+      if (url.pathname === "/api/payments/method") {
+        payment = { ...payment, methodVersion: 2 };
+        send({ customerId: body.customerId, methodVersion: 2 });
+        return;
+      }
+      if (url.pathname === "/api/payments/reconcile") {
+        if (delayReconcile)
+          await new Promise((resolve) => {
+            releaseReconcile = resolve;
+          });
+        if (failReconcile) {
+          res.statusCode = 409;
+          send({ error: { message: "Mock reconciliation unavailable" } });
+          return;
+        }
+        send({
+          inbox: [{ eventId: "inbox-not-applied", applied: false }],
+          checks: [
+            {
+              invoiceId: payment.invoiceId,
+              attemptId: "attempt-1",
+              result: "unresolved"
+            }
+          ],
+          runs: [],
+          issues: []
+        });
+        return;
+      }
+      if (url.pathname.endsWith("/run")) {
+        send({
+          id: payment.workflowId,
+          status: payment.workflowId ? "complete" : "not_started"
+        });
+        return;
+      }
+      if (url.pathname.startsWith("/api/payments/inv_")) {
+        send({
+          ...payment,
+          attempts: payment.attemptsUsed
+            ? [
+                {
+                  id: "attempt-1",
+                  attemptNumber: 1,
+                  state: "needs_review",
+                  amountCents: 500,
+                  idempotencyKey: "stable-original-key",
+                  processorPaymentId: "processor-1",
+                  generation: 1,
+                  methodVersion: 1,
+                  updatedAt: payment.updatedAt
+                }
+              ]
+            : [],
+          timeline: [
+            {
+              id: "timeline-1",
+              generation: 1,
+              attemptNumber: 1,
+              kind: "recovery_check",
+              message: "Durable recovery notice",
+              createdAt: payment.updatedAt,
+              deadlineAt: null
+            }
+          ]
+        });
+        return;
+      }
+      res.statusCode = 404;
+      send({ error: { message: "Unknown fixture endpoint" } });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => {
+      releaseCustomer?.();
+      releaseReconcile?.();
+      server.closeAllConnections();
+      server.close();
+    });
+    const profile = mkdtempSync(join(tmpdir(), "payment-ui-browser-"));
+    const child = spawn(
+      browser,
+      [
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--remote-debugging-port=0",
+        `--user-data-dir=${profile}`,
+        "about:blank"
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] }
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    t.after(async () => {
+      child.kill();
+      await sleep(700);
+      rmSync(profile, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 200
+      });
+    });
+    await until(
+      () => /DevTools listening on (ws:\/\/\S+)/.test(stderr),
+      "Chromium startup"
+    );
+    const debugUrl = new URL(
+      stderr.match(/DevTools listening on (ws:\/\/\S+)/)[1]
+    );
+    const targets = await (
+      await fetch(`http://${debugUrl.host}/json/list`)
+    ).json();
+    const cdp = await connect(
+      targets.find((target) => target.type === "page").webSocketDebuggerUrl
+    );
+    t.after(() => cdp.socket.close());
+    const evaluate = async (expression) => {
+      const result = await cdp.send("Runtime.evaluate", {
+        expression,
+        returnByValue: true,
+        awaitPromise: true
+      });
+      if (result.exceptionDetails)
+        throw new Error(JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const text = () => evaluate("document.body.innerText");
+    const waitText = (needle) =>
+      until(async () => (await text()).includes(needle), needle);
+    const click = (label) =>
+      evaluate(
+        `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)}).click()`
+      );
+    await cdp.send("Page.navigate", {
+      url: `http://127.0.0.1:${server.address().port}/`
+    });
+    await waitText("Acme test account");
+    await waitText("0/4 attempts");
+    assert.match(await text(), /Existing usage/);
+    await click("Payment details & controls");
+    await waitText("Durable recovery notice");
+    assert.match(await text(), /no real money or email/);
+    await evaluate(
+      "Array.from(document.querySelectorAll('summary')).find(s=>s.textContent.includes('Mock scenario controls')).click()"
+    );
+    await evaluate(
+      "const s=document.querySelector('select[aria-label^=\"Mock scenario\"]'); s.value='4'; s.dispatchEvent(new Event('change',{bubbles:true}));"
+    );
+    await click("Save scenario queue");
+    await waitText("Mock queue saved: lost_response");
+    assert.deepEqual(queued, ["lost_response"]);
+    await click("Collect payment");
+    await waitText("1/4 attempts");
+    await waitText("Webhook received, not applied");
+    await waitText("Workflow: complete");
+    assert.match(await text(), /Financial: needs review/);
+    assert.equal(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Collect payment').disabled"
+      ),
+      true
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('summary')).find(s=>s.textContent.includes('Attempt 1')).click()"
+    );
+    await waitText("stable-original-key");
+    await click("Reconcile payments");
+    await waitText("attempt-1: unresolved");
+    assert.match(await text(), /0 internal ledger issues/);
+    assert.match(await text(), /unapplied — retry reconciliation/);
+    assert.equal(
+      calls.findLast((c) => c.path === "/api/payments/reconcile").body.resume,
+      false
+    );
+    await click("Simulate card update");
+    await waitText("version 2 for this customer");
+    assert.deepEqual(
+      calls.findLast((c) => c.path === "/api/payments/method").body,
+      { customerId: "cus_acme", expectedVersion: 1 }
+    );
+    failReconcile = true;
+    await click("Reconcile payments");
+    await waitText("Mock reconciliation unavailable");
+    // Late financial success is visible without restarting the completed Workflow.
+    payment = {
+      ...payment,
+      status: "paid",
+      paidCents: 500,
+      reservedCents: 0,
+      balanceCents: 0,
+      needsAttention: 0,
+      updatedAt: "2026-10-01T00:00:02Z"
+    };
+    inbox = [];
+    await waitText("Financial: paid");
+    await waitText("0 invoices · 0 unapplied events");
+    assert.equal(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Collect payment').disabled"
+      ),
+      true
+    );
+    // Retain all legacy billing line items and approved-credit details.
+    await evaluate(
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('September 2026')).click()"
+    );
+    await waitText("Existing invoice line");
+    await waitText("Existing approved credit");
+    failReconcile = false;
+    delayReconcile = true;
+    await click("Reconcile payments");
+    await until(
+      () => Boolean(releaseReconcile),
+      "delayed old customer mutation"
+    );
+    await waitText("Reconciling…");
+    assert.equal(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Reconcile payments').disabled"
+      ),
+      true
+    );
+    assert.equal(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Simulate card update').disabled"
+      ),
+      true
+    );
+    delayCustomer = "cus_acme";
+    await click("Refresh");
+    await until(() => Boolean(releaseCustomer), "delayed old customer read");
+    await evaluate("window.showCustomer('cus_orbit')");
+    await waitText("Orbit test account");
+    releaseCustomer();
+    releaseReconcile();
+    await sleep(300);
+    assert.doesNotMatch(
+      await text(),
+      /Acme test account|Mock reconciliation unavailable|workflow-ended|Reconciliation finished/
+    );
+  }
+);

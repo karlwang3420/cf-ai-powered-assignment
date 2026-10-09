@@ -16,6 +16,7 @@ import { BillingError, getCustomer } from "./billing/store";
 import { withDedupedStreamText } from "./workers-ai";
 
 export { InvoiceWorkflow } from "./invoice-workflow";
+export { PaymentWorkflow } from "./payment-workflow";
 
 // Llama 3.3 on Workers AI, as recommended by the assignment. It supports
 // function calling, which the billing tools use.

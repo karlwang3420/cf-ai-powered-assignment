@@ -4,6 +4,7 @@
  * is a single statement or one atomic db.batch(), with SQL guards and unique
  * constraints making retries and concurrent calls safe.
  */
+import { reconcilePayments } from "./payments.ts";
 import {
   buildInvoiceLines,
   formatCents,
@@ -444,8 +445,8 @@ export type Credit = CreditInput & { customerId: string; createdAt: string };
 
 /**
  * Issues a credit against a finalized invoice. The credit and its ledger
- * entries are written atomically, and the SQL guard ensures total credits
- * never exceed the invoice total, even under concurrent requests.
+ * entries are written atomically. The SQL guard subtracts credits, posted
+ * payments and unresolved reservations, including those held for review.
  */
 export async function issueCredit(
   db: D1Database,
@@ -467,9 +468,8 @@ export async function issueCredit(
         `INSERT INTO credits (id, invoice_id, customer_id, amount_cents, reason, approved_by, created_at)
          SELECT ?1, i.id, i.customer_id, ?3, ?4, ?5, ?6 FROM invoices i
          WHERE i.id = ?2 AND i.status = 'finalized'
-           AND i.total_cents - (
-             SELECT COALESCE(SUM(amount_cents), 0) FROM credits WHERE invoice_id = i.id
-           ) >= ?3
+           AND EXISTS (SELECT 1 FROM payment_balances b WHERE b.invoice_id = i.id
+             AND b.total_cents - b.credited_cents - b.paid_cents - b.reserved_cents >= ?3)
          ON CONFLICT (id) DO NOTHING`
       )
       .bind(id, invoiceId, amountCents, reason, approvedBy, createdAt),
@@ -513,13 +513,14 @@ export async function issueCredit(
         `invoice "${invoiceId}" is not finalized`
       );
     }
-    const credited = await db
+    const balance = await db
       .prepare(
-        "SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM credits WHERE invoice_id = ?"
+        `SELECT total_cents - credited_cents - paid_cents - reserved_cents AS cents
+         FROM payment_balances WHERE invoice_id = ?`
       )
       .bind(invoiceId)
       .first<{ cents: number }>();
-    const remaining = (invoice.totalCents ?? 0) - (credited?.cents ?? 0);
+    const remaining = balance?.cents ?? 0;
     throw new BillingError(
       "conflict",
       `credit exceeds the remaining creditable amount on "${invoiceId}": only ${formatCents(remaining)} can still be credited`
@@ -532,7 +533,7 @@ export async function issueCredit(
     );
   }
   return {
-    status: inserted.meta.changes === 1 ? "issued" : "duplicate",
+    status: inserted.meta.changes > 0 ? "issued" : "duplicate",
     credit: {
       id: row.id,
       invoiceId: row.invoice_id,
@@ -688,8 +689,8 @@ export type ReconciliationIssue = {
 };
 
 /**
- * Cross-checks the ledger against invoices and credits. An empty result
- * means every transaction balances and every document is posted correctly.
+ * Cross-checks internal invoices, credits, payments, reservations and ledger.
+ * Processor comparison belongs to the payment recovery service, not this store.
  */
 export async function reconcile(
   db: D1Database
@@ -765,6 +766,7 @@ export async function reconcile(
       overCredited,
       "over_credited",
       (r) => `credits ${r.amount} > total ${r.total}`
-    )
+    ),
+    ...(await reconcilePayments(db))
   ];
 }

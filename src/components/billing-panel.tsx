@@ -10,6 +10,12 @@ import {
 import { formatCents } from "../billing/pricing";
 import type { InvoiceDetail, InvoiceSummary } from "../billing/store";
 import { api, monthLabel, type CustomerDetail } from "../client-api";
+import type { PaymentCollection } from "../billing/payments";
+import {
+  PaymentAttention,
+  PaymentInvoice,
+  useCustomerPayments
+} from "./payment-panel";
 
 const selectClass =
   "w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default focus:outline-none focus:ring-1 focus:ring-kumo-ring";
@@ -68,9 +74,11 @@ function InvoiceRunner({
     setRun({ phase: "running", month, status: "queued" });
     try {
       const { id } = await api.startInvoiceRun(detail.customer.id, month);
+      if (cancelled.current) return;
       // Poll the Workflow instance until it finishes
       for (let attempt = 0; attempt < 120 && !cancelled.current; attempt++) {
         const status = await api.invoiceRun(id);
+        if (cancelled.current) return;
         if (status.status === "complete") {
           const total = status.output?.totalCents ?? null;
           setRun({
@@ -93,7 +101,15 @@ function InvoiceRunner({
         setRun({ phase: "running", month, status: status.status });
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
+      if (!cancelled.current)
+        setRun({
+          phase: "failed",
+          month,
+          message:
+            "Stopped waiting after 120 checks. The Workflow may still be running; refresh billing before starting another run."
+        });
     } catch (error) {
+      if (cancelled.current) return;
       setRun({ phase: "failed", month, message: (error as Error).message });
     }
   };
@@ -155,7 +171,8 @@ function InvoiceRunner({
         </div>
       )}
       <Text size="xs" variant="secondary">
-        Runs a Cloudflare Workflow: open draft → finalize → reconcile ledger.
+        Runs a Cloudflare Workflow: open draft → finalize → reconcile ledger →
+        start mock collection. Invoice completion does not mean paid.
       </Text>
     </div>
   );
@@ -165,10 +182,16 @@ function InvoiceRunner({
 
 function InvoiceRow({
   invoice,
-  version
+  version,
+  payment,
+  paymentStale,
+  onChanged
 }: {
   invoice: InvoiceSummary;
   version: number;
+  payment?: PaymentCollection;
+  paymentStale: boolean;
+  onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<InvoiceDetail | null>(null);
@@ -177,6 +200,7 @@ function InvoiceRow({
   useEffect(() => {
     if (!open) return;
     let stale = false;
+    setError(null);
     api
       .invoice(invoice.id)
       .then((d) => !stale && setDetail(d))
@@ -246,6 +270,19 @@ function InvoiceRow({
           )}
         </div>
       )}
+      {payment && (
+        <PaymentInvoice
+          payment={payment}
+          stale={paymentStale}
+          onChanged={onChanged}
+        />
+      )}
+      {invoice.status === "finalized" && !payment && (
+        <p className="px-3 pb-3 text-xs text-kumo-subtle">
+          Payment state unavailable or loading. No payment controls until
+          loaded.
+        </p>
+      )}
     </div>
   );
 }
@@ -264,6 +301,11 @@ export function BillingPanel({
   const [error, setError] = useState<string | null>(null);
   const [reloads, setReloads] = useState(0);
   const reload = useCallback(() => setReloads((n) => n + 1), []);
+  const payments = useCustomerPayments(
+    customerId,
+    refreshKey + reloads,
+    reload
+  );
 
   useEffect(() => {
     let stale = false;
@@ -282,11 +324,14 @@ export function BillingPanel({
 
   if (error) {
     return (
-      <div className="p-5">
+      <div className="p-5 space-y-2">
         <Text size="sm" variant="secondary">
-          Could not load billing data: {error}. Did you run{" "}
-          <code>npm run db:setup</code>?
+          Could not load billing data: {error}. Check local migrations; do not
+          reset demo data.
         </Text>
+        <Button variant="secondary" size="sm" onClick={reload}>
+          Retry billing read
+        </Button>
       </div>
     );
   }
@@ -329,6 +374,35 @@ export function BillingPanel({
         <InvoiceRunner key={customer.id} detail={detail} onFinished={reload} />
       </Section>
 
+      <Section title="Mock payments · no real money">
+        {payments.error && (
+          <p role="alert" className="text-xs text-kumo-danger">
+            Could not refresh payment state: {payments.error}. Apply pending
+            local migrations without resetting demo data. Retrying
+            automatically.
+          </p>
+        )}
+        {!payments.snapshot && !payments.error && (
+          <Text size="xs" variant="secondary">
+            Loading payment state…
+          </Text>
+        )}
+        {payments.snapshot && (
+          <PaymentAttention
+            payments={payments.snapshot.payments}
+            inbox={payments.snapshot.inbox}
+          />
+        )}
+        <a
+          href="/cdn-cgi/local/explorer"
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs underline text-kumo-subtle"
+        >
+          Developer-only: local Workflow Explorer
+        </a>
+      </Section>
+
       <Section title="Invoices">
         {invoices.length === 0 ? (
           <Text size="sm" variant="secondary">
@@ -341,6 +415,11 @@ export function BillingPanel({
                 key={invoice.id}
                 invoice={invoice}
                 version={refreshKey + reloads}
+                payment={payments.snapshot?.payments.find(
+                  (p) => p.invoiceId === invoice.id
+                )}
+                paymentStale={Boolean(payments.error)}
+                onChanged={reload}
               />
             ))}
           </div>

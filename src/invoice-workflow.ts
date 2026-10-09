@@ -11,6 +11,8 @@ import {
   reconcile
 } from "./billing/store.ts";
 
+import { startCollection } from "./payments/service.ts";
+
 export type InvoiceRunParams = { customerId: string; month: string };
 
 export type InvoiceRunResult = {
@@ -69,6 +71,10 @@ export class InvoiceWorkflow extends WorkflowEntrypoint<Env, InvoiceRunParams> {
         issues
       );
     }
+    await step.do("start payment collection", RETRIES, async () => {
+      const result = await startCollection(this.env, invoice.id);
+      return { id: result.id };
+    });
     return {
       invoiceId: invoice.id,
       totalCents: invoice.totalCents,

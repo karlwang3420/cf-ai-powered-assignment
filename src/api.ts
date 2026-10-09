@@ -18,7 +18,10 @@ import {
   type BillingErrorCode
 } from "./billing/store.ts";
 
-export type ApiEnv = {
+import { handlePaymentApi } from "./payments/api.ts";
+import { paymentLog, type PaymentEnv } from "./payments/service.ts";
+
+export type ApiEnv = PaymentEnv & {
   DB: D1Database;
   INVOICE_WORKFLOW: Pick<Workflow, "create" | "get">;
 };
@@ -109,6 +112,8 @@ export async function handleApi(
   const route = `${request.method} ${parts[0]}${parts.length > 1 ? "/:id" : ""}`;
 
   try {
+    const payment = await handlePaymentApi(request, env);
+    if (payment) return payment;
     switch (route) {
       case "GET customers":
         return json(await listCustomers(env.DB));
@@ -138,7 +143,19 @@ export async function handleApi(
   } catch (err) {
     if (err instanceof BillingError)
       return error(STATUS[err.code], err.code, err.message);
-    console.error("API error", err);
+    if (parts[0] === "payments") {
+      // Transport errors may carry raw processor data; log only safe correlation fields.
+      paymentLog(
+        "payment_api_failed",
+        {
+          ...(parts.length === 3 ||
+          (parts.length === 2 && request.method === "GET")
+            ? { invoiceId: parts[1] }
+            : {})
+        },
+        { method: request.method }
+      );
+    } else console.error("API error", err);
     return error(500, "internal", "internal error");
   }
 }

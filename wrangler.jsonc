@@ -5,6 +5,14 @@
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
+  "observability": { "enabled": true },
+  "services": [
+    { "binding": "PAYMENT_PROCESSOR", "service": "mock-payment-processor" }
+  ],
+  "vars": {
+    "PROCESSOR_TOKEN": "demo-only-processor-token-not-a-secret",
+    "PROCESSOR_WEBHOOK_SECRET": "demo-only-webhook-hmac-not-a-secret"
+  },
   // Shared billing database, the source of truth for every customer. Local
   // dev uses a local SQLite copy; `wrangler deploy` provisions the real one.
   "d1_databases": [
@@ -25,6 +33,11 @@
       "name": "invoice-workflow",
       "binding": "INVOICE_WORKFLOW",
       "class_name": "InvoiceWorkflow"
+    },
+    {
+      "name": "payment-workflow",
+      "binding": "PAYMENT_WORKFLOW",
+      "class_name": "PaymentWorkflow"
     }
   ],
   "durable_objects": {

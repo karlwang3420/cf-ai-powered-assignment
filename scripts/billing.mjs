@@ -4,6 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { Miniflare } from "miniflare";
 import { formatCents, parseDollars } from "../src/billing/pricing.ts";
 import {
@@ -24,8 +25,11 @@ process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 const HELP = `Local billing CLI (uses the local D1 database in .wrangler/state)
 
 Setup
-  setup                                  apply migrations and load demo data
-  reset                                  delete all local billing data, then setup
+  setup                                  apply migrations; seed only an empty database
+  reset                                  DESTRUCTIVE: delete local merchant billing data
+
+Options: --persist-to=PATH selects isolated persistence (default .wrangler/state).
+Payment commands use the running local API, not direct D1 (--url=http://localhost:5173).
 
 Billing
   customers                              list customers and balances
@@ -37,7 +41,16 @@ Billing
   show <invoice-id>                      invoice lines and credits
   credit <invoice-id> <dollars> <reason...> [--id=CREDIT-ID]
                                          issue an approved credit, e.g. 10.00
-  reconcile                              check the ledger against invoices and credits
+  reconcile                              check internal ledger/payment/reservation invariants
+
+Payments (running npm run dev required; no AI calls)
+  payments [customer]                    list authoritative collection status
+  payment <invoice-id>                   inspect amounts, attempts and timeline
+  payment-timeline <invoice-id>           inspect durable notices and correlation IDs
+  payment-processor <invoice-id>          inspect processor records and delivery outbox
+  collect <invoice-id>                    start/recover bounded collection (may charge)
+  reconcile-payments [invoice-id] [--resume]
+                                         drain inbox and compare original keys; resume is opt-in
 
 Meters: workers_requests, ai_neurons. Customers: cus_acme, cus_nimbus, cus_orbit.`;
 
@@ -52,10 +65,20 @@ function wrangler(args, env = {}) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-function setup() {
-  // CI=1 skips wrangler's interactive "apply migrations?" prompt
-  wrangler(["d1", "migrations", "apply", "billing", "--local"], { CI: "1" });
-  wrangler(["d1", "execute", "billing", "--local", "--file", "seed/demo.sql"]);
+async function setup() {
+  // Apply upgrades without deleting/reseeding existing merchant data.
+  const local = ["--local", "--persist-to", persistence];
+  wrangler(["d1", "migrations", "apply", "billing", ...local], { CI: "1" });
+  const { count } = await withDatabase((db) =>
+    db.prepare("SELECT COUNT(*) AS count FROM customers").first()
+  );
+  if (count === 0) {
+    wrangler(["d1", "execute", "billing", ...local, "--file", "seed/demo.sql"]);
+  } else {
+    console.log(
+      "Migrations applied; existing customers/data preserved (no demo reseed)."
+    );
+  }
 }
 
 async function withDatabase(fn) {
@@ -64,7 +87,7 @@ async function withDatabase(fn) {
     modules: true,
     script: "export default { fetch() { return new Response(null) } }",
     d1Databases: { DB: "DB" },
-    d1Persist: ".wrangler/state/v3/d1"
+    d1Persist: path.join(persistence, "v3", "d1")
   });
   try {
     return await fn(await mf.getD1Database("DB"));
@@ -183,7 +206,9 @@ const commands = {
   async reconcile(db) {
     const issues = await reconcile(db);
     if (issues.length === 0)
-      console.log("OK: ledger, invoices, and credits reconcile.");
+      console.log(
+        "OK: internal ledger, invoices, credits, payments and reservations reconcile (processor not queried)."
+      );
     else
       table(issues, [
         ["Check", (i) => i.check],
@@ -205,11 +230,72 @@ const options = Object.fromEntries(
 );
 const args = rest.filter((a) => !a.startsWith("--"));
 
+const persistence = path.resolve(options["persist-to"] || ".wrangler/state");
+const paymentCommands = new Set([
+  "payments",
+  "payment",
+  "payment-timeline",
+  "payment-processor",
+  "collect",
+  "reconcile-payments"
+]);
+async function paymentCommand() {
+  const base = new URL(options.url || "http://localhost:5173");
+  if (
+    base.protocol !== "http:" ||
+    !["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)
+  )
+    throw new Error(
+      "Payment CLI requires an http loopback --url for the local demo API."
+    );
+  let route = "/api/payments",
+    method = "GET",
+    body;
+  if (command === "reconcile-payments") {
+    route += "/reconcile";
+    method = "POST";
+    body = {
+      ...(args[0] ? { invoiceId: args[0] } : {}),
+      resume: "resume" in options
+    };
+  } else if (command === "payments") {
+    if (args[0]) route += `?customerId=${encodeURIComponent(args[0])}`;
+  } else {
+    if (!args[0]) throw new Error(`${command} requires an invoice ID`);
+    route += `/${encodeURIComponent(args[0])}`;
+    if (command === "payment-timeline") route += "/timeline";
+    if (command === "payment-processor") route += "/processor";
+    if (command === "collect") {
+      route += "/collect";
+      method = "POST";
+    }
+  }
+  const response = await fetch(new URL(route, base), {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000)
+  });
+  const result = await response.json();
+  console.log(JSON.stringify(result, null, 2));
+  if (
+    !response.ok ||
+    (command === "reconcile-payments" &&
+      (result.issues?.length ||
+        result.inbox?.some((e) => !e.applied) ||
+        result.checks?.some((c) =>
+          ["unresolved", "error", "conflict"].includes(c.result)
+        )))
+  )
+    process.exitCode = 1;
+}
+
 try {
-  if (command === "setup") setup();
+  if (command === "setup") await setup();
+  else if (paymentCommands.has(command)) await paymentCommand();
   else if (command === "reset") {
     await withDatabase(dropAllTables);
-    setup();
+    await setup();
   } else if (commands[command]) {
     await withDatabase((db) => commands[command](db, args, options));
   } else {

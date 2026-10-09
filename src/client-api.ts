@@ -1,10 +1,38 @@
 // Typed client for the billing JSON API (src/api.ts), used by the UI.
 import type {
+  PaymentCollection,
+  PaymentDetail,
+  PaymentInboxEvent
+} from "./billing/payments";
+import type { ProcessorScenario } from "./payments/protocol";
+import type { reconcilePaymentCollections } from "./payments/service";
+import type {
   CustomerSummary,
   InvoiceDetail,
   InvoiceSummary,
   MeterUsage
 } from "./billing/store";
+
+export type PaymentReconciliation = Awaited<
+  ReturnType<typeof reconcilePaymentCollections>
+>;
+export type PaymentRun = {
+  id: string | null;
+  status: InstanceStatus["status"] | "not_started" | "unavailable";
+  output?: {
+    invoiceId: string;
+    status: PaymentCollection["status"];
+    attemptsUsed: number;
+  };
+  error?: { name: string; message: string } | null;
+};
+
+const paymentPath = (id: string) => `/api/payments/${encodeURIComponent(id)}`;
+const jsonBody = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body)
+});
 
 export type CustomerDetail = {
   customer: CustomerSummary;
@@ -38,6 +66,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  payments: (customerId: string) =>
+    request<PaymentCollection[]>(
+      `/api/payments?customerId=${encodeURIComponent(customerId)}`
+    ),
+  paymentInbox: (customerId: string) =>
+    request<PaymentInboxEvent[]>(
+      `/api/payments/inbox?customerId=${encodeURIComponent(customerId)}`
+    ),
+  payment: (id: string) => request<PaymentDetail>(paymentPath(id)),
+  paymentRun: (id: string) => request<PaymentRun>(`${paymentPath(id)}/run`),
+  collectPayment: (id: string) =>
+    request<{ id: string | null; started: boolean; collection: PaymentDetail }>(
+      `${paymentPath(id)}/collect`,
+      { method: "POST" }
+    ),
+  reconcilePayments: (invoiceId: string, resume = false) =>
+    request<PaymentReconciliation>(
+      "/api/payments/reconcile",
+      jsonBody("POST", { invoiceId, resume })
+    ),
+  updatePaymentMethod: (customerId: string, expectedVersion: number) =>
+    request<{ customerId: string; methodVersion: number }>(
+      "/api/payments/method",
+      jsonBody("POST", { customerId, expectedVersion })
+    ),
+  paymentScenarios: (id: string, scenarios: ProcessorScenario[]) =>
+    request<{ invoiceId: string; scenarios: ProcessorScenario[] }>(
+      `${paymentPath(id)}/scenarios`,
+      jsonBody("PUT", { scenarios })
+    ),
   customers: () => request<CustomerSummary[]>("/api/customers"),
   customer: (id: string) =>
     request<CustomerDetail>(`/api/customers/${encodeURIComponent(id)}`),

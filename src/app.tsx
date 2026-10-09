@@ -48,16 +48,22 @@ function Shell() {
   const refresh = useCallback(() => setRefreshKey((n) => n + 1), []);
 
   useEffect(() => {
+    let stale = false;
     api
       .customers()
       .then((list) => {
+        if (stale) return;
+        setLoadError(null);
         setCustomers(list);
         // Fall back if the saved customer no longer exists (e.g. after a reset)
         if (list.length > 0 && !list.some((c) => c.id === customerId)) {
           setCustomerId(list[0].id);
         }
       })
-      .catch((e: Error) => setLoadError(e.message));
+      .catch((e: Error) => !stale && setLoadError(e.message));
+    return () => {
+      stale = true;
+    };
   }, [customerId]);
 
   const selectCustomer = (id: string) => {
@@ -68,7 +74,7 @@ function Shell() {
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
       <header className="px-5 py-3 bg-kumo-base border-b border-kumo-line">
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 min-w-0">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default whitespace-nowrap">
               <ReceiptIcon size={20} className="inline mr-2 align-[-3px]" />
@@ -79,13 +85,13 @@ function Shell() {
               Llama 3.3
             </Badge>
           </div>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2">
+          <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
+            <label className="flex flex-1 items-center gap-2 min-w-0">
               <Text size="xs" variant="secondary">
                 Customer
               </Text>
               <select
-                className="px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default focus:outline-none focus:ring-1 focus:ring-kumo-ring"
+                className="w-full min-w-0 sm:w-auto sm:max-w-64 px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default focus:outline-none focus:ring-1 focus:ring-kumo-ring"
                 value={customerId}
                 onChange={(e) => selectCustomer(e.target.value)}
                 disabled={!customers}
@@ -111,8 +117,12 @@ function Shell() {
         </div>
       ) : (
         <main className="flex-1 min-h-0 flex flex-col lg:flex-row">
-          <aside className="lg:w-[400px] shrink-0 max-h-[45vh] lg:max-h-none overflow-y-auto border-b lg:border-b-0 lg:border-r border-kumo-line bg-kumo-base">
-            <BillingPanel customerId={customerId} refreshKey={refreshKey} />
+          <aside className="lg:w-[400px] min-w-0 wrap-anywhere shrink-0 max-h-[45vh] lg:max-h-none overflow-y-auto border-b lg:border-b-0 lg:border-r border-kumo-line bg-kumo-base">
+            <BillingPanel
+              key={customerId}
+              customerId={customerId}
+              refreshKey={refreshKey}
+            />
           </aside>
           <section className="flex-1 min-h-0 min-w-0">
             {/* Remount per customer: each customer has their own chat agent */}

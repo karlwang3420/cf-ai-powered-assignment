@@ -18,7 +18,11 @@ function statements(path) {
     .filter((chunk) => chunk.replace(/^\s*--.*$/gm, "").trim());
 }
 
-export async function database(t, { seed = true } = {}) {
+export async function applyMigration(db, path) {
+  for (const sql of statements(path)) await db.prepare(sql).run();
+}
+
+export async function database(t, { seed = true, through = null } = {}) {
   const mf = new Miniflare({
     modules: true,
     script: "export default { fetch() { return new Response(null) } }",
@@ -28,10 +32,11 @@ export async function database(t, { seed = true } = {}) {
   const db = await mf.getD1Database("DB");
   const files = readdirSync(new URL("migrations/", root))
     .sort()
+    .filter((name) => through === null || name <= through)
     .map((name) => `migrations/${name}`);
   if (seed) files.push("seed/demo.sql");
   for (const file of files) {
-    for (const sql of statements(file)) await db.prepare(sql).run();
+    await applyMigration(db, file);
   }
   return db;
 }

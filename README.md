@@ -4,23 +4,29 @@ An AI billing assistant for a usage-based cloud platform, built on Cloudflare.
 
 Pick a customer, run monthly invoices through a Cloudflare Workflow, and ask
 the assistant why a bill changed. It looks up the real billing data, explains
-the charges, and can propose a credit that you approve or reject.
+the charges, and can propose a credit that you approve or reject. Finalized
+invoices also collect **mock payments** through a second Worker, with bounded
+retries, card-update waits and late-webhook reconciliation. No real money moves.
 
 ## Architecture
 
-| Component      | Implementation                                                                     |
-| -------------- | ---------------------------------------------------------------------------------- |
-| LLM            | Llama 3.3 70B on Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`)           |
-| Chat input     | React + Vite UI, streamed over WebSockets via the Agents SDK                       |
-| Memory / state | Chat history in each `BillingAssistant` agent's built-in SQLite (Durable Object)   |
-| Billing data   | One shared D1 database, the source of truth for every customer                     |
-| Coordination   | Cloudflare Workflow for invoice runs; one chat agent (Durable Object) per customer |
+| Component      | Implementation                                                                   |
+| -------------- | -------------------------------------------------------------------------------- |
+| LLM            | Llama 3.3 70B on Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`)         |
+| Chat input     | React + Vite UI, streamed over WebSockets via the Agents SDK                     |
+| Memory / state | Chat history in each `BillingAssistant` agent's built-in SQLite (Durable Object) |
+| Billing data   | One shared D1 database, the source of truth for every customer                   |
+| Coordination   | InvoiceWorkflow + PaymentWorkflow; one chat agent per customer                   |
+| Mock processor | Separate Worker with immutable idempotency keys and SQLite DO delivery outbox    |
 
 ```
 Browser ── WebSocket ──> BillingAssistant agent (one per customer) ── tools ──┐
    │                        └─ Llama 3.3 on Workers AI                          │
    └──── /api/* ──> Worker ── creates ──> InvoiceWorkflow                      ├─> D1 (billing)
                                             open → finalize → reconcile ───────┘
+                                                      └─> PaymentWorkflow ──> mock processor
+                                                            │                      │
+                                                            └─> D1 <─ signed webhook
 ```
 
 **The AI never calculates or moves money.** Pricing, invoicing, and the ledger
@@ -32,44 +38,63 @@ data through tools and proposes credits, which a person must approve.
 - **Customer-scoped tools** (`src/assistant-tools.ts`). Each customer has their
   own agent instance, and its tools only query that customer's data. Read
   tools: account overview, invoice details, monthly usage, month-over-month
-  comparison, and daily usage with spike detection.
+  comparison, daily usage with spike detection, and read-only payment state/timeline.
 - **No arithmetic by the model.** Comparisons, percentages, medians, and
   per-meter charges are computed in code (`src/billing/reports.ts`) and
   returned already formatted.
 - **Credits need human approval.** `issueCredit` has `needsApproval: true`;
   the UI shows an Approve/Reject card. The tool call id is the credit's
   idempotency key, so a replayed approval cannot credit twice, and the
-  database caps credits at the invoice total.
+  database atomically caps credits at total minus credits, posted payments and
+  unresolved reservations. The assistant has no payment-mutation tool.
 - **Deterministic edges.** A rejected credit gets a fixed reply without the
   model. After a failed credit, the credit tool is withheld for that turn so
   the model explains the error instead of retrying.
 
 ## Invoice Workflow
 
-`src/invoice-workflow.ts` runs three steps, each retried with backoff and
-checkpointed: open the draft invoice (closing the month to new usage),
-finalize it (price, write lines and ledger entries atomically), and reconcile
-the ledger. Bad input (unknown customer, month not ended) fails immediately
+`src/invoice-workflow.ts` checkpoints opening the draft invoice (closing the
+month to new usage), finalization (price, lines and ledger atomically), ledger
+reconciliation, and starting a separate payment collection Workflow. Bad input (unknown customer, month not ended) fails immediately
 instead of retrying. Because every billing operation is idempotent, a step
 that runs twice is harmless.
 
 Billing starts with a customer's first full month, since there is no
 proration.
 
+## Payment collection
+
+[`docs/payment-workflow.md`](docs/payment-workflow.md) is the approved design
+and implementation/validation map. `PaymentWorkflow` persists immutable attempts
+and reservations before contacting the mock processor. At most four new attempts
+share a lifetime budget; transport retries reuse the same key/payload. Unknown
+money remains reserved, even after the run ends in needs-review. Shared D1
+reconciliation applies processor responses, lookups and signed webhooks once,
+including late success after Workflow completion.
+
+The billing panel provides authoritative paid/reserved/due/creditable amounts,
+needs-attention, durable timeline, scenario queues, simulated card updates and
+explicit **Reconcile payments** (bounded resume is opt-in). Notices are local
+records, not emails. New UI invoice runs automatically collect; CLI-finalized
+invoices remain available for configuring a scenario before collection.
+
 ## Billing design
 
 Schema: [`migrations/0001_billing_schema.sql`](migrations/0001_billing_schema.sql).
 Prices: [`migrations/0002_price_catalog.sql`](migrations/0002_price_catalog.sql).
+Payments/cash ledger upgrade: [`migrations/0003_payments.sql`](migrations/0003_payments.sql).
 
-| Table                       | Purpose                                                              |
-| --------------------------- | -------------------------------------------------------------------- |
-| `plans`, `meters`           | Price plans (monthly fee) and what is metered (requests, AI neurons) |
-| `price_tiers`               | Graduated prices per plan and meter, e.g. first 10M requests free    |
-| `customers`                 | Customers and their plan                                             |
-| `usage_events`              | Raw usage, keyed by the producer's idempotency key                   |
-| `invoices`, `invoice_lines` | Monthly invoices and their line items                                |
-| `credits`                   | Approved credits against finalized invoices                          |
-| `ledger_entries`            | Append-only double-entry ledger                                      |
+| Table                                                             | Purpose                                                              |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `plans`, `meters`                                                 | Price plans (monthly fee) and what is metered (requests, AI neurons) |
+| `price_tiers`                                                     | Graduated prices per plan and meter, e.g. first 10M requests free    |
+| `customers`                                                       | Customers and their plan                                             |
+| `usage_events`                                                    | Raw usage, keyed by the producer's idempotency key                   |
+| `invoices`, `invoice_lines`                                       | Monthly invoices and their line items                                |
+| `credits`                                                         | Approved credits against finalized invoices                          |
+| `ledger_entries`                                                  | Append-only double-entry ledger, including cash/payment postings     |
+| `payment_collections`, `payment_attempts`, `payment_reservations` | Ownership, lifetime attempt budget and unresolved money              |
+| `payments`, `payment_webhook_inbox`, `payment_timeline`           | Posted payments, durable receipt/application and notices             |
 
 - **Exact money.** Amounts are integer cents. Unit prices are integer
   micro-dollars, so sub-cent rates like $0.011 per 1,000 neurons are exact.
@@ -84,11 +109,12 @@ Prices: [`migrations/0002_price_catalog.sql`](migrations/0002_price_catalog.sql)
 - **Double-entry ledger.** Each invoice debits accounts receivable and credits
   revenue; each credit reverses part of that. Triggers make entries immutable,
   and a unique (transaction, account) key prevents double posting.
-- **Capped credits.** A SQL guard keeps total credits on an invoice at or
-  below its total, even under concurrent requests.
+- **Capped allocation.** SQL guards keep credits + posted payments + unresolved
+  reservations at or below the invoice total, including concurrent mutations.
 - **Reconciliation.** `reconcile()` reports unbalanced ledger transactions,
   invoices whose lines or ledger postings don't match their total, unposted
-  credits, and over-credited invoices.
+  credits, invalid payment/reservation postings and over-allocation. The local
+  payment reconciliation action also compares original processor keys.
 
 **Why D1:** it keeps the project entirely on Cloudflare with no external
 database to host. D1 cannot hold a transaction open while code runs, so each
@@ -97,19 +123,21 @@ constraints instead of locks. A production billing system at scale would more
 likely use Postgres, which D1's single-threaded design and 10 GB limit don't
 replace.
 
-**Not implemented:** payments, proration for mid-month plan changes, price
-changes over time, taxes, and currencies other than USD.
+**Not implemented:** real payment processing/refunds, proration for mid-month
+plan changes, price changes over time, taxes, or currencies other than USD.
 
 ## Run locally
 
-Requires Node.js 24+ and a Cloudflare account. Workers AI has no local
-simulator, so local development calls Cloudflare remotely. D1 runs locally as
-a SQLite file under `.wrangler/state/`.
+Requires Node.js 24+. Chat needs a Cloudflare account because Workers AI has
+no local simulator; payments/tests need no model calls. Local financial and
+processor state persists under `.wrangler/state/`. Stop dev before migration
+or legacy direct-file CLI writes (Windows SQLite locking). Preserve existing
+demo data: setup applies migrations and seeds only an empty customer database.
 
 ```sh
 npm install
 npx wrangler login
-npm run db:setup     # create the billing tables and load demo data
+npm run db:setup     # migrate without resetting; seed only if empty
 npm run dev
 ```
 
@@ -122,8 +150,16 @@ To test by hand (UI walkthrough, billing CLI, reconciliation), see
 
 ```sh
 npm run check   # formatting, lint, and type checking
-npm test        # unit tests, plus billing tests against a real local D1
+npm test        # fresh D1, browser fixtures and real two-Worker integration (~minutes)
+node --test tests/payment-integration.test.mjs
+npm run types
+npx vite build
 ```
+
+The final reviewed tree passed all **106 tests** with
+`node --test --test-concurrency=2 tests/*.test.mjs`. One unrestricted `npm test`
+run stalled in a local runtime test; its cause remains unproven. Use the bounded
+command if you encounter this, and see [validation details](docs/local-testing.md#automated-verification-no-ai).
 
 ## Notes
 
@@ -132,8 +168,13 @@ npm test        # unit tests, plus billing tests against a real local D1
   twice and tool-call arguments interleave into invalid JSON.
   `src/workers-ai.ts` removes the duplicate before the provider reads the
   stream.
-- **No authentication:** the API and chat are open, since this is a demo over
-  seeded data. Credits can only be issued through an approved chat proposal.
+- **Demo only / no authentication:** billing/chat/payment-control APIs are open.
+  Chat credits require approval; the local operator CLI also issues approved
+  credits. Processor bearer/HMAC credentials are public fixtures, not secrets.
+  No real money/card data/email; do not expose dev or Explorer publicly.
+- **Local observability:** `/cdn-cgi/local/explorer` shows Workflows and local
+  logs/traces on the pinned tooling. See [verified routes and correlation
+  queries](docs/observability.md); financial truth remains D1, not logs.
 - **Prompt history:** prompts are recorded in `PROMPTS.md` by a repo-local Pi
   extension; see `docs/prompt-history.md`.
 - **Starter template:** this project is based on Cloudflare's

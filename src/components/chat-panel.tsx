@@ -141,15 +141,17 @@ export function ChatPanel({
         <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
           {messages.length === 0 && (
             <Empty
+              className="px-4 sm:px-10"
               icon={<ChatCircleDotsIcon size={32} />}
               title="Ask about this account's billing"
               contents={
-                <div className="flex flex-wrap justify-center gap-2">
+                <div className="flex max-w-full flex-wrap justify-center gap-2">
                   {suggestions().map((prompt) => (
                     <Button
                       key={prompt}
                       variant="outline"
                       size="sm"
+                      className="max-w-full h-auto whitespace-normal py-1.5"
                       disabled={isStreaming || !connected}
                       onClick={() => send(prompt)}
                     >
@@ -243,7 +245,7 @@ export function ChatPanel({
               placeholder="Ask about usage, invoices, or charges..."
               disabled={!connected || isStreaming}
               rows={1}
-              className="flex-1 ring-0! focus:ring-0! shadow-none! bg-transparent! outline-none! resize-none max-h-40"
+              className="flex-1 min-w-0 ring-0! focus:ring-0! shadow-none! bg-transparent! outline-none! resize-none max-h-40"
             />
             {isStreaming ? (
               <Button

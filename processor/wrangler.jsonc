@@ -1,0 +1,16 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "mock-payment-processor",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "durable_objects": {
+    "bindings": [{ "name": "PROCESSOR_STATE", "class_name": "ProcessorState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ProcessorState"] }],
+  "vars": {
+    "PROCESSOR_TOKEN": "demo-only-processor-token-not-a-secret",
+    "PROCESSOR_WEBHOOK_SECRET": "demo-only-webhook-hmac-not-a-secret"
+  },
+  "services": [{ "binding": "MERCHANT", "service": "billing-assistant" }],
+  "dev": { "port": 8790 }
+}

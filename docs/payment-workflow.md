@@ -1,6 +1,9 @@
 # Payment collection workflow (design)
 
-> **Status:** design only, not implemented yet.
+> **Status:** implemented as a local, mock-money demonstration. Merchant D1,
+> processor Worker, PaymentWorkflow, API/UI/CLI recovery and isolated integration
+> tests are present. The diagrams below remain the approved contract; see the
+> implementation/validation map at the end for limits and explicit test fixtures.
 
 After an invoice is finalized, `PaymentWorkflow` collects payment from a mock
 processor Worker. It handles outages, declines, pending charges and late or
@@ -206,25 +209,25 @@ entered it has finished.
 ```mermaid
 stateDiagram-v2
     [*] --> open: invoice finalized
-    open --> processing: atomic reservation; budget available
+    open --> processing: atomic reservation with budget available
     open --> settled: zero balance
     processing --> paid: reconcile success
-    processing --> retrying: soft decline; release reservation
-    processing --> action_required: hard decline; release reservation
+    processing --> retrying: soft decline releases reservation
+    processing --> action_required: hard decline releases reservation
     processing --> recovering: timeout / unknown
     recovering --> paid: reconcile success
     recovering --> retrying: confirmed soft decline
     recovering --> action_required: confirmed hard decline
-    recovering --> needs_review: recovery exhausted; keep reservation
+    recovering --> needs_review: recovery exhausted keeps reservation
     needs_review --> paid: late success / reconciliation
-    needs_review --> retrying: confirmed soft decline; release reservation
-    needs_review --> action_required: confirmed hard decline; release reservation
-    retrying --> processing: scheduled retry; shared budget available
+    needs_review --> retrying: confirmed soft decline releases reservation
+    needs_review --> action_required: confirmed hard decline releases reservation
+    retrying --> processing: scheduled retry with shared budget available
     retrying --> settled: zero balance
-    retrying --> past_due: budget exhausted; guarded positive balance
-    action_required --> processing: newer card; shared budget available
+    retrying --> past_due: budget exhausted with guarded positive balance
+    action_required --> processing: newer card with shared budget available
     action_required --> settled: zero balance
-    action_required --> past_due: timeout / budget exhausted; guarded positive balance
+    action_required --> past_due: timeout / budget exhausted with guarded positive balance
     past_due --> settled: credit clears balance
     paid --> [*]
     settled --> [*]
@@ -249,7 +252,7 @@ or charging again.
 - **Late results remain actionable:** financial application is independent of
   Workflow lifetime; durable unapplied events have an explicit local retry owner.
 
-Before implementation, verify Cloudflare `waitForEvent` / `sendEvent` signatures,
+Runtime validation must verify Cloudflare `waitForEvent` / `sendEvent` signatures,
 timeout handling, early-event buffering/retention and local behavior. Ensure
 exhausted charge-step retries reach recovery rather than just failing the run.
 Correctness must not depend on event buffering: D1 and processor lookup remain
@@ -280,3 +283,79 @@ Validate:
    preserves attempt numbering and cannot bypass unresolved-charge blocking.
 8. Run a local two-Worker integration test for real Workflow event behavior in
    addition to store/unit tests.
+
+## Implementation and validation map
+
+- **Global financial authority:** `migrations/0003_payments.sql` and
+  `src/billing/payments.ts` implement guarded ownership/preparation, immutable
+  attempts, reservations, paid/reserved-aware credit caps, shared reconciliation,
+  cash ledger postings and durable inbox/timeline. Migration preserves existing
+  invoices/ledger and backfills finalized collections. `billing setup` applies
+  upgrades without reseeding existing customers/data.
+- **Processor:** `processor/` owns separate SQLite idempotency/outbox state,
+  nine scenario controls, indefinite key retention, durable alarms and signed
+  callback delivery. Terminal outcomes cannot be force-edited. The lost-response
+  scenario returns a deterministic 504 after committing success; it is not a
+  physical socket-disconnect test. Unresolved pending has no production
+  force-resolution control. No real money, email or card information exists.
+- **Runtime:** `src/payment-workflow.ts`, `src/payments/collection.ts` and
+  `service.ts` run actual Workflow checkpoints, sleeps and events. Charge retries
+  use two retries after the first call; original-key automatic recovery has
+  three checks. Demo waits are 30 seconds, dunning 3/6/9 seconds. Elapsed durable
+  deadlines skip sleeping, not the D1 re-read or status lookup; they never extend
+  a deadline. A real local timeout regression caught and fixed the emulator's
+  rejection of `sleepUntil` in the past.
+- **Runtime signatures actually exercised:** `step.waitForEvent(name,
+{ type, timeout })` and `instance.sendEvent({ type, payload })`. An isolated
+  probe observes early buffering after creation, event-type matching and caught
+  timeout. Financial correctness still does not assume indefinite event
+  retention. Pending signed callbacks exercise the reverse service binding;
+  missing callbacks fall back to original-key reconciliation.
+- **Recovery surface:** `src/payments/api.ts`, billing-panel payment controls
+  and `scripts/billing.mjs` expose read state/timeline, collect, processor
+  inspection and explicit reconciliation. Resume is opt-in; no background queue
+  is assumed. A pending observation can apply successfully but its reconciliation
+  **check remains unresolved**, not a successful payment. Confirmed decline also
+  does not mean paid. The assistant only reads payment state; existing credits
+  still require approval and all arithmetic remains deterministic code.
+- **Real two-Worker integration:** `tests/payment-integration.test.mjs` uses the
+  actual Vite config with remote bindings disabled and fresh OS-temp persistence.
+  It exercises success, soft/hard decline recovery, four-attempt exhaustion and
+  resume, lost response, missing/duplicate webhook, pending, needs-review/late
+  signed success and full-credit card timeout. It asserts unique payments,
+  balanced ledger, retained unknown reservation and unchanged attempt budget.
+  The runtime companion test covers actual outage backoff and automatic
+  InvoiceWorkflow collection. Tests never reset user `.wrangler` state.
+- **Explicit integration fixtures:** the late case delays only a real pending
+  processor record's resolution timestamp in a stopped fresh test store; normal
+  alarm/status/signing/delivery then resolve it. The test observes needs-review
+  and the ended original run before late success. Full-credit testing uses a
+  harness-only Vite transform to call unchanged `issueCredit` on the live bound
+  D1, preserving atomic batch semantics without a production mutation endpoint
+  or AI call. See [local testing](local-testing.md) for exact isolation details.
+- **Layered invariant/crash evidence:** store/API tests inject rollback,
+  inbox-application/notification failure, duplicates, stale/late outcomes and
+  credit/reservation races. Fake-step tests cover unavailable/not-found/expired
+  retention and repeated hard-decline budgets. These are not claims that every
+  physical crash boundary or every hostile event ordering was injected through
+  a real browser and both running Workers.
+- **Observability actually probed:** pinned plugin 1.50.0 / Wrangler 4.118.0
+  serve `/cdn-cgi/local/explorer`, structured correlation logs and local spans
+  for both Workers. [Observability](observability.md) documents the verified
+  read-only query route and limitations. Financial timeline remains D1 truth.
+
+### Deliberate boundaries
+
+This is an unauthenticated demo, not production payment infrastructure. Processor
+bearer/HMAC credentials are public fixtures. No deployment, real processor,
+refunds, production mail delivery, background reconciliation scheduler or
+production observability retention was added. Local method updates are simulated
+customer-level versions, not card-token storage. Keys/events are retained
+indefinitely; there is no unsafe force-release/reset escape hatch.
+
+UI invoice runs start collection automatically; direct-D1 CLI invoice
+finalization leaves collection to the explicit local API command/control so a
+scenario can be chosen first. Stop dev for migrations/legacy direct-file CLI
+writes on Windows; new payment CLI commands use the running API. Existing demo
+state was not migrated or reset during implementation. Independent review and
+production/security hardening remain separate gates.
