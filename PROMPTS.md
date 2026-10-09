@@ -351,3 +351,15 @@
 
 > [23:48:40 (UTC-04:00)] ok, commit
 
+> [23:54:18 (UTC-04:00)] now we should work on readme. put a short description then script commands to set up. then pictures for important controls (manual), link to other docs if needed
+
+## 2026-10-09
+
+> [00:32:00 (UTC-04:00)] add PROMPTS.md link to near the top.
+> add a short descript of how this project meets the requirement near the top
+> make the invoice look simplier, just say Wokers AI, Workers requests, total usage and total cost, make it a three column table
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-d61d40c3-c667-4ce5-9b66-6e732d8a5f5a.png
+
+> [00:42:00 (UTC-04:00)] commit
+

@@ -198,9 +198,20 @@ test(
           lines: [
             {
               lineNo: 1,
-              description: "Existing invoice line",
+              kind: "subscription",
+              meterId: null,
+              description: "Standard plan (monthly fee)",
+              quantity: 1,
               amountCents: 500
-            }
+            },
+            ...[20, 22].map((quantity, index) => ({
+              lineNo: index + 2,
+              kind: "usage",
+              meterId: "workers_requests",
+              description: `Workers requests: ${quantity} included`,
+              quantity,
+              amountCents: 0
+            }))
           ],
           credits: [
             {
@@ -568,8 +579,26 @@ test(
     await evaluate(
       "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('September 2026')).click()"
     );
-    await waitText("Existing invoice line");
+    await waitText("Plan fee");
     await waitText("Existing approved credit");
+    const invoiceTable = 'table[aria-label="September 2026 invoice charges"]';
+    assert.deepEqual(
+      await evaluate(
+        `Array.from(document.querySelectorAll('${invoiceTable} thead th')).map(el => el.textContent)`
+      ),
+      ["Service", "Total usage", "Total cost"]
+    );
+    assert.deepEqual(
+      await evaluate(
+        `Array.from(document.querySelectorAll('${invoiceTable} tbody tr')).map(row => Array.from(row.cells).map(cell => cell.textContent))`
+      ),
+      [
+        ["Plan fee", "—", "$5.00"],
+        ["Workers requests", "42requests", "$0.00"]
+      ]
+    );
+    assert.match(await text(), /Total\s+\$5\.00/);
+    assert.doesNotMatch(await text(), /monthly fee|20 included|22 included/);
     await click("Update card");
     await waitText("Card updated.");
     assert.deepEqual(

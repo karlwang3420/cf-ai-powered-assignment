@@ -8,6 +8,7 @@ import {
 import { formatCents } from "../billing/pricing";
 import type { InvoiceDetail, InvoiceSummary } from "../billing/store";
 import { api, monthLabel, type CustomerDetail } from "../client-api";
+import { summarizeInvoiceLines } from "./invoice-summary";
 import type { PaymentCollection } from "../billing/payments";
 import {
   CustomerPaymentLine,
@@ -97,16 +98,68 @@ function InvoiceRow({
               {error}
             </Text>
           )}
-          {detail?.lines.map((line) => (
-            <div key={line.lineNo} className="flex gap-3 text-xs">
-              <span className="flex-1 text-kumo-subtle">
-                {line.description}
-              </span>
-              <span className="tabular-nums text-kumo-default">
-                {formatCents(line.amountCents)}
-              </span>
-            </div>
-          ))}
+          {detail && detail.lines.length > 0 && (
+            <table
+              className="w-full text-xs"
+              aria-label={`${monthLabel(month)} invoice charges`}
+            >
+              <thead>
+                <tr className="text-kumo-subtle">
+                  <th scope="col" className="pb-2 text-left font-normal">
+                    Service
+                  </th>
+                  <th scope="col" className="pb-2 px-2 text-right font-normal">
+                    Total usage
+                  </th>
+                  <th scope="col" className="pb-2 text-right font-normal">
+                    Total cost
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {summarizeInvoiceLines(detail.lines).map((row) => (
+                  <tr key={row.key} className="text-kumo-default">
+                    <th scope="row" className="py-1.5 text-left font-normal">
+                      {row.service}
+                    </th>
+                    <td className="py-1.5 px-2 text-right tabular-nums">
+                      {row.quantity === null ? (
+                        "—"
+                      ) : (
+                        <>
+                          {count(row.quantity)}
+                          {row.unit && (
+                            <span className="block text-kumo-subtle">
+                              {row.unit}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums whitespace-nowrap">
+                      {formatCents(row.amountCents)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-kumo-line text-kumo-default">
+                  <th
+                    scope="row"
+                    colSpan={2}
+                    className="pt-2 text-left font-medium"
+                  >
+                    Total
+                  </th>
+                  <td className="pt-2 text-right font-medium tabular-nums whitespace-nowrap">
+                    {invoice.totalCents === null
+                      ? "—"
+                      : formatCents(invoice.totalCents)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          )}
           {detail?.credits.map((credit) => (
             <div key={credit.id} className="flex gap-3 text-xs">
               <span className="flex-1 text-kumo-subtle">
