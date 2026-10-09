@@ -330,3 +330,24 @@
 
 > [22:41:51 (UTC-04:00)] ok, commit
 
+> [22:48:56 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-286b6910-8269-4d61-98d9-abbba316650e.png
+> 
+> right now i am in the need review staus. and i can't click collect again or change mock behavior. the workflow is stuck
+
+> [23:01:13 (UTC-04:00)] yes. adding a mock control doesn't break any rules. mock services are suppose to be controllable and independent of our workflow. and what does the reconcile button do if not for this?
+
+> [23:20:13 (UTC-04:00)] 1. when i choose "success - no response" the activity looks like it's normal
+> 2. when i click reset to unpaid, there is an error
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-9ccab0fa-9ad9-4fe3-882f-ae1ac8161107.png
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-8a346cb9-a16c-4b89-917e-dd7cfc693893.png
+
+> [23:28:38 (UTC-04:00)] then we should add webhook recieved to activity, too
+
+> [23:45:17 (UTC-04:00)] ok, how much effort is it to change timestamp to millisecond accuracy
+
+> [23:47:55 (UTC-04:00)] i am ok with the display not show the milliseconds, but the order should be stable
+
+> [23:48:40 (UTC-04:00)] ok, commit
+
