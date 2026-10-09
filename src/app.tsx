@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import type { CustomerSummary } from "./billing/store";
 import { api } from "./client-api";
+import { AdminPage } from "./components/admin-page";
 import { BillingPanel } from "./components/billing-panel";
 import { ChatPanel } from "./components/chat-panel";
 
@@ -30,14 +31,68 @@ function ThemeToggle() {
     <Button
       variant="secondary"
       shape="square"
-      icon={dark ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+      icon={dark ? <SunIcon size="1rem" /> : <MoonIcon size="1rem" />}
       onClick={toggle}
       aria-label="Toggle theme"
     />
   );
 }
 
+type View = "customer" | "admin";
+const viewFromPath = (): View =>
+  location.pathname.replace(/\/+$/, "") === "/admin" ? "admin" : "customer";
+
+/** Two pages share one SPA; pushState switches without a full reload. */
+function useView(): [View, (next: View) => void] {
+  const [view, setView] = useState(viewFromPath);
+  useEffect(() => {
+    const sync = () => setView(viewFromPath());
+    addEventListener("popstate", sync);
+    return () => removeEventListener("popstate", sync);
+  }, []);
+  const go = useCallback((next: View) => {
+    history.pushState(null, "", next === "admin" ? "/admin" : "/");
+    setView(next);
+  }, []);
+  return [view, go];
+}
+
+function ViewSwitch({
+  view,
+  onChange
+}: {
+  view: View;
+  onChange: (next: View) => void;
+}) {
+  return (
+    <nav
+      className="flex rounded-lg border border-kumo-line p-0.5"
+      aria-label="View"
+    >
+      {(["customer", "admin"] as const).map((v) => (
+        <a
+          key={v}
+          href={v === "admin" ? "/admin" : "/"}
+          aria-current={view === v ? "page" : undefined}
+          onClick={(e) => {
+            e.preventDefault();
+            onChange(v);
+          }}
+          className={`px-3 py-1 text-sm rounded-md capitalize ${
+            view === v
+              ? "bg-kumo-elevated text-kumo-default font-medium"
+              : "text-kumo-subtle"
+          }`}
+        >
+          {v}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
 function Shell() {
+  const [view, setView] = useView();
   const [customers, setCustomers] = useState<CustomerSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [customerId, setCustomerId] = useState(
@@ -77,16 +132,30 @@ function Shell() {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 min-w-0">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default whitespace-nowrap">
-              <ReceiptIcon size={20} className="inline mr-2 align-[-3px]" />
+              <ReceiptIcon
+                size="1.25rem"
+                className="inline mr-2 align-[-0.1875rem]"
+              />
               Billing Assistant
             </h1>
-            <Badge variant="secondary">
-              <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
-              Llama 3.3
-            </Badge>
+            {view === "customer" ? (
+              <Badge variant="secondary">
+                <ChatCircleDotsIcon
+                  size="0.75rem"
+                  weight="bold"
+                  className="mr-1"
+                />
+                Llama 3.3
+              </Badge>
+            ) : (
+              <Badge variant="warning">Mock money</Badge>
+            )}
           </div>
           <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
-            <label className="flex flex-1 items-center gap-2 min-w-0">
+            <ViewSwitch view={view} onChange={setView} />
+            <label
+              className={`flex-1 items-center gap-2 min-w-0 ${view === "customer" ? "flex" : "hidden"}`}
+            >
               <Text size="xs" variant="secondary">
                 Customer
               </Text>
@@ -115,9 +184,13 @@ function Shell() {
             <code>npm run db:setup</code> and reload.
           </Text>
         </div>
+      ) : view === "admin" ? (
+        <main className="flex-1 min-h-0">
+          {customers && <AdminPage customers={customers} />}
+        </main>
       ) : (
         <main className="flex-1 min-h-0 flex flex-col lg:flex-row">
-          <aside className="lg:w-[400px] min-w-0 wrap-anywhere shrink-0 max-h-[45vh] lg:max-h-none overflow-y-auto border-b lg:border-b-0 lg:border-r border-kumo-line bg-kumo-base">
+          <aside className="lg:w-[25rem] min-w-0 wrap-anywhere shrink-0 max-h-[45vh] lg:max-h-none overflow-y-auto border-b lg:border-b-0 lg:border-r border-kumo-line bg-kumo-base">
             <BillingPanel
               key={customerId}
               customerId={customerId}

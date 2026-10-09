@@ -39,8 +39,10 @@ Do not send chat messages in this offline mode. Keep the printed temp path;
 stop that dev process before direct-file CLI writes, supplying the **same**
 `--persist-to="$TEST_STATE"` each time. Omitting it targets normal user data.
 
-**Reset policy:** there is no processor reset/force-outcome endpoint. Keys and
-terminal outcomes are retained indefinitely. To restart a demo, stop its
+**Reset policy:** there is no force-outcome endpoint. To return one invoice to
+unpaid, use the admin dialog's **Debug → Reset to unpaid**, which clears that
+invoice in both merchant D1 and the processor (see
+[payment workflow](payment-workflow.md#deliberate-boundaries)). To restart a whole demo, stop its
 process and allocate a **new disposable directory** using the commands above;
 this resets both merchant and processor by isolation, without deleting old
 state. Never reset just the merchant while reusing processor invoice/key IDs.
@@ -128,28 +130,28 @@ $11.76; immutable replay returns the same invoice. In contrast, the UI's
 **Run invoice** automatically starts collection after finalization; default
 processor success may pay it before you can select a different scenario.
 
-1. Open <http://localhost:5173>, select the customer, then **Payment details &
-   controls** on the invoice. Existing invoice lines, credits and usage remain.
-2. Expand **Mock scenario controls**, choose a preset and **Save scenario
-   queue**. This affects future new keys only, not historical attempts.
-3. **Collect payment** starts/reuses the bounded generation. It is not a
+1. Open <http://localhost:5173/admin> and click an invoice row. The dialog
+   shows status, money and actions; the customer view at `/` stays read-only.
+2. In **Mock controls**, choose a preset. It is sent to the processor
+   immediately and affects future new keys only, not historical attempts.
+3. **Collect** starts/reuses the bounded generation. It is not a
    force-retry. Inspect authoritative paid/reserved/due/creditable amounts and
    `n/4` attempts; reserved money is still unresolved, not failed.
 4. Soft decline → success waits 3 seconds. Later slots are 6 and 9 seconds
    (production day-1/3/7 labels). Hard decline requires **Simulate card update**
    within the fixed 30-second wait. Duplicate updates cannot reset budget or
    extend the deadline. After an ended run, opt into bounded resume explicitly.
-5. **Reconcile payments** drains unapplied inbox and looks up original keys.
-   The unchecked **Also resume bounded collection** option may start a new run
+5. **Reconcile** drains unapplied inbox and looks up original keys.
+   **Reconcile + resume** may start a new run
    and charge the remaining balance; it never bypasses unresolved money or the
    four-attempt limit. Read unresolved/error/conflict checks even when internal
    invariant issues are empty.
 6. Pending normally succeeds after 2 seconds. Unresolved pending reaches
    needs-review after three 30-second checks and keeps its reservation. The
-   **Needs attention** section includes reservations and merchant unapplied
+   admin **Needs review** / **Held** tiles include reservations and merchant unapplied
    events, not merely Workflow failures. A real late result can still post
    after the old Workflow ends; no unsafe manual force-success UI is provided.
-7. Expand attempts/timeline for immutable keys, method versions, processor IDs,
+7. Use the **Activity** and **Debug** tabs for timeline, immutable keys, method versions, processor IDs,
    notices, deadlines and Workflow IDs. Continue polling financial state:
    Workflow completion alone is not payment proof.
 

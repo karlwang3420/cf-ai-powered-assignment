@@ -301,7 +301,9 @@ Validate:
 - **Runtime:** `src/payment-workflow.ts`, `src/payments/collection.ts` and
   `service.ts` run actual Workflow checkpoints, sleeps and events. Charge retries
   use two retries after the first call; original-key automatic recovery has
-  three checks. Demo waits are 30 seconds, dunning 3/6/9 seconds. Elapsed durable
+  three checks. Demo waits are 30 seconds, dunning 3/6/9 seconds;
+  the isolated `payment-test` Vite mode scales them by `PAYMENT_TIME_SCALE`
+  (default 0.2) so integration tests finish faster. Elapsed durable
   deadlines skip sleeping, not the D1 re-read or status lookup; they never extend
   a deadline. A real local timeout regression caught and fixed the emulator's
   rejection of `sleepUntil` in the past.
@@ -351,7 +353,15 @@ bearer/HMAC credentials are public fixtures. No deployment, real processor,
 refunds, production mail delivery, background reconciliation scheduler or
 production observability retention was added. Local method updates are simulated
 customer-level versions, not card-token storage. Keys/events are retained
-indefinitely; there is no unsafe force-release/reset escape hatch.
+indefinitely; there is no force-release or force-success control. The one
+exception is the admin dialog's local **Debug → Reset to unpaid**
+(`POST /api/payments/:invoiceId/debug-reset`, migration `0004`). It stops the
+old run, clears that invoice's processor keys/outbox/queue first, then in one D1
+batch deletes its payments, cash/receivable postings, reservations, attempts,
+webhooks and timeline. The invoice reopens with four attempts and a new
+generation; credits remain. No-delete triggers allow this only while that
+invoice is unlocked inside the batch. A webhook already in flight at the reset
+moment is not fenced; wait for active runs to settle before resetting.
 
 UI invoice runs start collection automatically; direct-D1 CLI invoice
 finalization leaves collection to the explicit local API command/control so a

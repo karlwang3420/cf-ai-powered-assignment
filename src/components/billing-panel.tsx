@@ -1,24 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Surface, Text } from "@cloudflare/kumo";
 import {
   ArrowsClockwiseIcon,
   CaretRightIcon,
-  CheckCircleIcon,
-  LightningIcon,
-  WarningCircleIcon
+  CreditCardIcon
 } from "@phosphor-icons/react";
 import { formatCents } from "../billing/pricing";
 import type { InvoiceDetail, InvoiceSummary } from "../billing/store";
 import { api, monthLabel, type CustomerDetail } from "../client-api";
 import type { PaymentCollection } from "../billing/payments";
 import {
-  PaymentAttention,
-  PaymentInvoice,
+  CustomerPaymentLine,
+  PaymentBadge,
   useCustomerPayments
 } from "./payment-panel";
-
-const selectClass =
-  "w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default focus:outline-none focus:ring-1 focus:ring-kumo-ring";
 
 function Section({
   title,
@@ -39,159 +34,16 @@ function Section({
 
 const count = (n: number) => n.toLocaleString("en-US");
 
-// ── Invoice run (Workflow) ────────────────────────────────────────────
-
-type RunState =
-  | { phase: "idle" }
-  | { phase: "running"; month: string; status: string }
-  | { phase: "done"; month: string; message: string }
-  | { phase: "failed"; month: string; message: string };
-
-function InvoiceRunner({
-  detail,
-  onFinished
-}: {
-  detail: CustomerDetail;
-  onFinished: () => void;
-}) {
-  const open = detail.months.filter((m) => m.status !== "finalized");
-  const [chosen, setMonth] = useState("");
-  // Fall back to the newest open month when the choice was just invoiced
-  const month = open.some((m) => m.month === chosen)
-    ? chosen
-    : (open[0]?.month ?? "");
-  const [run, setRun] = useState<RunState>({ phase: "idle" });
-  const cancelled = useRef(false);
-
-  useEffect(() => {
-    cancelled.current = false;
-    return () => {
-      cancelled.current = true;
-    };
-  }, []);
-
-  const start = async () => {
-    setRun({ phase: "running", month, status: "queued" });
-    try {
-      const { id } = await api.startInvoiceRun(detail.customer.id, month);
-      if (cancelled.current) return;
-      // Poll the Workflow instance until it finishes
-      for (let attempt = 0; attempt < 120 && !cancelled.current; attempt++) {
-        const status = await api.invoiceRun(id);
-        if (cancelled.current) return;
-        if (status.status === "complete") {
-          const total = status.output?.totalCents ?? null;
-          setRun({
-            phase: "done",
-            month,
-            message: `Invoice finalized: ${total === null ? "-" : formatCents(total)}`
-          });
-          onFinished();
-          return;
-        }
-        if (status.status === "errored" || status.status === "terminated") {
-          setRun({
-            phase: "failed",
-            month,
-            message: status.error?.message ?? "Workflow failed"
-          });
-          onFinished();
-          return;
-        }
-        setRun({ phase: "running", month, status: status.status });
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-      if (!cancelled.current)
-        setRun({
-          phase: "failed",
-          month,
-          message:
-            "Stopped waiting after 120 checks. The Workflow may still be running; refresh billing before starting another run."
-        });
-    } catch (error) {
-      if (cancelled.current) return;
-      setRun({ phase: "failed", month, message: (error as Error).message });
-    }
-  };
-
-  const allInvoiced = open.length === 0 && run.phase !== "running";
-
-  return (
-    <div className="space-y-2">
-      {allInvoiced ? (
-        <Text size="sm" variant="secondary">
-          Every ended month is invoiced.
-        </Text>
-      ) : (
-        <div className="flex gap-2">
-          <select
-            className={selectClass}
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            disabled={run.phase === "running"}
-            aria-label="Month to invoice"
-          >
-            {open.map((m) => (
-              <option key={m.month} value={m.month}>
-                {monthLabel(m.month)}
-                {m.status === "draft" ? " (draft)" : ""}
-              </option>
-            ))}
-          </select>
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<LightningIcon size={14} />}
-            disabled={!month || run.phase === "running"}
-            onClick={start}
-          >
-            Run invoice
-          </Button>
-        </div>
-      )}
-      {run.phase === "running" && (
-        <Text size="xs" variant="secondary">
-          Workflow {run.status} for {monthLabel(run.month)}…
-        </Text>
-      )}
-      {run.phase === "done" && (
-        <div className="flex items-center gap-1.5 text-kumo-success">
-          <CheckCircleIcon size={14} />
-          <Text size="xs">
-            {monthLabel(run.month)}: {run.message}
-          </Text>
-        </div>
-      )}
-      {run.phase === "failed" && (
-        <div className="flex items-center gap-1.5 text-kumo-danger">
-          <WarningCircleIcon size={14} />
-          <Text size="xs">
-            {monthLabel(run.month)}: {run.message}
-          </Text>
-        </div>
-      )}
-      <Text size="xs" variant="secondary">
-        Runs a Cloudflare Workflow: open draft → finalize → reconcile ledger →
-        start mock collection. Invoice completion does not mean paid.
-      </Text>
-    </div>
-  );
-}
-
 // ── Invoices ──────────────────────────────────────────────────────────
 
 function InvoiceRow({
   invoice,
   version,
-  payment,
-  paymentStale,
-  onChanged
+  payment
 }: {
   invoice: InvoiceSummary;
   version: number;
   payment?: PaymentCollection;
-  paymentStale: boolean;
-  onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<InvoiceDetail | null>(null);
@@ -220,7 +72,7 @@ function InvoiceRow({
         aria-expanded={open}
       >
         <CaretRightIcon
-          size={12}
+          size="0.75rem"
           className={`text-kumo-inactive transition-transform ${open ? "rotate-90" : ""}`}
         />
         <span className="flex-1 text-sm text-kumo-default">
@@ -235,7 +87,9 @@ function InvoiceRow({
         <span className="text-sm font-medium tabular-nums text-kumo-default">
           {invoice.totalCents === null ? "—" : formatCents(invoice.totalCents)}
         </span>
+        {payment && <PaymentBadge payment={payment} audience="customer" />}
       </button>
+      {payment && <CustomerPaymentLine payment={payment} />}
       {open && (
         <div className="px-3 pb-3 space-y-1.5 border-t border-kumo-line pt-2">
           {error && (
@@ -270,19 +124,58 @@ function InvoiceRow({
           )}
         </div>
       )}
-      {payment && (
-        <PaymentInvoice
-          payment={payment}
-          stale={paymentStale}
-          onChanged={onChanged}
-        />
-      )}
-      {invoice.status === "finalized" && !payment && (
-        <p className="px-3 pb-3 text-xs text-kumo-subtle">
-          Payment state unavailable or loading. No payment controls until
-          loaded.
-        </p>
-      )}
+    </div>
+  );
+}
+
+// ── Payment method ────────────────────────────────────────────────────
+
+/** Simulated card on file. No card data exists; updating bumps a version. */
+function PaymentMethod({
+  customerId,
+  version,
+  onChanged
+}: {
+  customerId: string;
+  version: number;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const update = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      await api.updatePaymentMethod(customerId, version);
+      setMessage("Card updated.");
+      onChanged();
+    } catch (e) {
+      setMessage((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="flex items-center gap-2 text-sm text-kumo-default">
+        <CreditCardIcon size="1rem" />
+        Card on file · v{version}
+      </span>
+      <div className="flex items-center gap-2">
+        {message && (
+          <Text size="xs" variant="secondary">
+            {message}
+          </Text>
+        )}
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() => void update()}
+        >
+          Update card
+        </Button>
+      </div>
     </div>
   );
 }
@@ -346,6 +239,8 @@ export function BillingPanel({
   }
 
   const { customer, invoices, currentUsage } = detail;
+  // The simulated card version is per customer; every collection carries it
+  const methodVersion = payments.snapshot?.payments[0]?.methodVersion;
   return (
     <div className="p-5 space-y-6">
       <Surface className="rounded-xl ring ring-kumo-line p-4 space-y-3">
@@ -370,39 +265,6 @@ export function BillingPanel({
         </div>
       </Surface>
 
-      <Section title="Run invoice">
-        <InvoiceRunner key={customer.id} detail={detail} onFinished={reload} />
-      </Section>
-
-      <Section title="Mock payments · no real money">
-        {payments.error && (
-          <p role="alert" className="text-xs text-kumo-danger">
-            Could not refresh payment state: {payments.error}. Apply pending
-            local migrations without resetting demo data. Retrying
-            automatically.
-          </p>
-        )}
-        {!payments.snapshot && !payments.error && (
-          <Text size="xs" variant="secondary">
-            Loading payment state…
-          </Text>
-        )}
-        {payments.snapshot && (
-          <PaymentAttention
-            payments={payments.snapshot.payments}
-            inbox={payments.snapshot.inbox}
-          />
-        )}
-        <a
-          href="/cdn-cgi/local/explorer"
-          target="_blank"
-          rel="noreferrer"
-          className="text-xs underline text-kumo-subtle"
-        >
-          Developer-only: local Workflow Explorer
-        </a>
-      </Section>
-
       <Section title="Invoices">
         {invoices.length === 0 ? (
           <Text size="sm" variant="secondary">
@@ -418,13 +280,26 @@ export function BillingPanel({
                 payment={payments.snapshot?.payments.find(
                   (p) => p.invoiceId === invoice.id
                 )}
-                paymentStale={Boolean(payments.error)}
-                onChanged={reload}
               />
             ))}
           </div>
         )}
+        {payments.error && (
+          <p role="alert" className="text-xs text-kumo-danger">
+            Could not refresh payment status. Retrying automatically.
+          </p>
+        )}
       </Section>
+
+      {methodVersion !== undefined && (
+        <Section title="Payment method">
+          <PaymentMethod
+            customerId={customer.id}
+            version={methodVersion}
+            onChanged={reload}
+          />
+        </Section>
+      )}
 
       <Section title={`${monthLabel(currentUsage.month)} so far`}>
         <div className="space-y-1">
@@ -442,7 +317,7 @@ export function BillingPanel({
       <Button
         variant="ghost"
         size="sm"
-        icon={<ArrowsClockwiseIcon size={14} />}
+        icon={<ArrowsClockwiseIcon size="0.875rem" />}
         onClick={reload}
       >
         Refresh

@@ -26,6 +26,20 @@ export const PAYMENT_TIMING = {
   cardMs: 30_000,
   retryMs: [3_000, 6_000, 9_000]
 } as const;
+
+/**
+ * Demo waits, optionally shortened by the PAYMENT_TIME_SCALE var. Only the
+ * isolated payment-test Vite mode sets it; everywhere else the scale is 1.
+ */
+export function paymentTiming(env: PaymentEnv) {
+  const scale = Number(env.PAYMENT_TIME_SCALE ?? 1);
+  const k = Number.isFinite(scale) && scale > 0 && scale <= 1 ? scale : 1;
+  return {
+    pendingMs: PAYMENT_TIMING.pendingMs * k,
+    cardMs: PAYMENT_TIMING.cardMs * k,
+    retryMs: PAYMENT_TIMING.retryMs.map((ms) => ms * k)
+  };
+}
 export const PAYMENT_RETRIES = {
   retries: { limit: 2, delay: "1 second", backoff: "exponential" },
   timeout: "10 seconds"
@@ -39,6 +53,7 @@ export async function runPaymentCollection(
   owner: CollectionOwner,
   step: WorkflowStep
 ) {
+  const timing = paymentTiming(env);
   const sleepUntilFuture = async (name: string, deadline: Date) => {
     if (Number(deadline) <= Date.now()) return;
     try {
@@ -104,9 +119,7 @@ export async function runPaymentCollection(
               kind: "card_update_requested",
               message:
                 "Update the simulated payment method to continue collection.",
-              deadlineAt: new Date(
-                Date.now() + PAYMENT_TIMING.cardMs
-              ).toISOString()
+              deadlineAt: new Date(Date.now() + timing.cardMs).toISOString()
             })
         );
         const deadline = Date.parse(notice.deadlineAt!);
@@ -164,7 +177,7 @@ export async function runPaymentCollection(
               message: `Dunning retry slot ${previous.attemptNumber} (day ${[1, 3, 7][previous.attemptNumber - 1]} in production).`,
               // Each newly declined attempt schedules a distinct slot relative to now, never a catch-up burst.
               deadlineAt: new Date(
-                Date.now() + PAYMENT_TIMING.retryMs[previous.attemptNumber - 1]
+                Date.now() + timing.retryMs[previous.attemptNumber - 1]
               ).toISOString()
             })
         );
@@ -277,9 +290,7 @@ export async function runPaymentCollection(
           attemptNumber: attempt.attemptNumber,
           kind: "recovery_check",
           message: `Original-key recovery check ${check + 1} of 3.`,
-          deadlineAt: new Date(
-            Date.now() + PAYMENT_TIMING.pendingMs
-          ).toISOString()
+          deadlineAt: new Date(Date.now() + timing.pendingMs).toISOString()
         })
       );
       state = await read(`${recovery}-before-wait`);

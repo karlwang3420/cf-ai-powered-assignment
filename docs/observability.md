@@ -56,8 +56,9 @@ status/result/check fields. Credentials, signatures and raw webhook bodies
 are not logged. Processor outbox event IDs correlate with durable merchant
 receipt; application and Workflow notification are separate states.
 
-In the UI, expand **Payment details & controls** to inspect ordered attempts,
-stable keys, generation/owner/run, method versions and durable notices/deadlines.
+In the admin view (`/admin`), open an invoice and use its **Debug** tab to
+inspect ordered attempts, stable keys, generation/owner/run and method versions;
+**Activity** shows durable notices.
 The timeline remains in merchant D1 even when terminal logs rotate or a Workflow
 ends. **Needs attention** includes unresolved reservations, action-required,
 positive past-due/conflicts, and actual unapplied merchant inbox events.

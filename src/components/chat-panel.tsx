@@ -107,7 +107,7 @@ export function ChatPanel({
       <div className="flex items-center justify-between gap-3 px-5 py-2 border-b border-kumo-line bg-kumo-base">
         <div className="flex items-center gap-1.5">
           <CircleIcon
-            size={8}
+            size="0.5rem"
             weight="fill"
             className={connected ? "text-kumo-success" : "text-kumo-danger"}
           />
@@ -117,7 +117,7 @@ export function ChatPanel({
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <BugIcon size={14} className="text-kumo-inactive" />
+            <BugIcon size="0.875rem" className="text-kumo-inactive" />
             <Switch
               checked={showDebug}
               onCheckedChange={setShowDebug}
@@ -128,7 +128,7 @@ export function ChatPanel({
           <Button
             variant="secondary"
             size="sm"
-            icon={<TrashIcon size={14} />}
+            icon={<TrashIcon size="0.875rem" />}
             onClick={clearHistory}
           >
             Clear chat
@@ -142,7 +142,7 @@ export function ChatPanel({
           {messages.length === 0 && (
             <Empty
               className="px-4 sm:px-10"
-              icon={<ChatCircleDotsIcon size={32} />}
+              icon={<ChatCircleDotsIcon size="2rem" />}
               title="Ask about this account's billing"
               contents={
                 <div className="flex max-w-full flex-wrap justify-center gap-2">
@@ -170,7 +170,7 @@ export function ChatPanel({
             return (
               <div key={message.id} className="space-y-2">
                 {showDebug && (
-                  <pre className="text-[11px] text-kumo-subtle bg-kumo-control rounded-lg p-3 overflow-auto max-h-64">
+                  <pre className="text-[0.6875rem] text-kumo-subtle bg-kumo-control rounded-lg p-3 overflow-auto max-h-64">
                     {JSON.stringify(message, null, 2)}
                   </pre>
                 )}
@@ -253,7 +253,7 @@ export function ChatPanel({
                 variant="secondary"
                 shape="square"
                 aria-label="Stop generation"
-                icon={<StopIcon size={18} />}
+                icon={<StopIcon size="1.125rem" />}
                 onClick={stop}
                 className="mb-0.5"
               />
@@ -264,7 +264,7 @@ export function ChatPanel({
                 shape="square"
                 aria-label="Send message"
                 disabled={!input.trim() || !connected}
-                icon={<PaperPlaneRightIcon size={18} />}
+                icon={<PaperPlaneRightIcon size="1.125rem" />}
                 className="mb-0.5"
               />
             )}

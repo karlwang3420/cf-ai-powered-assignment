@@ -10,6 +10,7 @@ import {
   paymentLog,
   processorRequest,
   receiveWebhook,
+  debugResetCollection,
   reconcilePaymentCollections,
   startCollection,
   type PaymentEnv
@@ -37,6 +38,9 @@ export async function handlePaymentApi(
   const action = path[1];
   if (path.length === 2 && request.method === "GET" && action === "inbox") {
     const scopes = url.searchParams.getAll("customerId");
+    // Admin console reads every customer's unapplied events; it must opt in explicitly.
+    if (url.searchParams.get("all") === "true" && scopes.length === 0)
+      return Response.json(await listPaymentInbox(env.DB));
     const customerId = scopes[0];
     if (scopes.length !== 1 || !customerId?.trim() || customerId.length > 500)
       throw new BillingError("invalid", "one non-empty customerId is required");
@@ -134,6 +138,8 @@ export async function handlePaymentApi(
       return Response.json(await startCollection(env, invoiceId), {
         status: 202
       });
+    if (request.method === "POST" && path[2] === "debug-reset")
+      return Response.json(await debugResetCollection(env, invoiceId));
     if (request.method === "GET" && path[2] === "timeline")
       return Response.json(
         (await getPaymentCollection(env.DB, invoiceId)).timeline

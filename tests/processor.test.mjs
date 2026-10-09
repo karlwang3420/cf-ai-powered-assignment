@@ -573,3 +573,41 @@ test("processor atomically rolls back charge/progression when durable event inse
   assert.equal(state.outbox.length, 2);
   assert.equal(state.requests.length, 1);
 });
+
+test("processor debug reset forgets only that invoice so the same key charges afresh", async (t) => {
+  const f = fixture(t);
+  await f.scenario(["success", "soft_decline"]);
+  const first = await (await f.call("/charges", "POST", payload())).json();
+  assert.equal(first.charge.status, "succeeded");
+  const other = payload({
+    invoiceId: "inv_2",
+    attemptId: "attempt_2",
+    idempotencyKey: "inv_2:1"
+  });
+  assert.ok((await f.call("/charges", "POST", other)).ok);
+  assert.equal(
+    (await f.call("/demo/reset", "POST", { invoiceId: "inv_1" })).status,
+    200
+  );
+  const cleared = await f.inspect();
+  assert.deepEqual(cleared.requests, []);
+  assert.deepEqual(cleared.outbox, []);
+  assert.deepEqual(cleared.scenarios, []);
+  const again = await (await f.call("/charges", "POST", payload())).json();
+  assert.notEqual(
+    again.charge.processorPaymentId,
+    first.charge.processorPaymentId
+  );
+  assert.notEqual(again.replayed, true);
+  assert.equal(
+    (await (await f.call("/charges?idempotencyKey=inv_2%3A1")).json()).charge
+      .status,
+    "succeeded",
+    "other invoices keep their keys"
+  );
+  assert.equal(
+    (await f.call("/demo/reset", "POST", { invoiceId: "inv_1" }, "wrong"))
+      .status,
+    401
+  );
+});

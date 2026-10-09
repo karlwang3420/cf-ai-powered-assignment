@@ -112,12 +112,12 @@ function customer(id) {
 }
 
 test(
-  "payment controls browser journey: queues, review, inbox recovery, late paid, errors and customer races",
+  "admin dialog and customer view browser journey: queues, review, inbox recovery, late paid, errors and customer races",
   { skip: !browser, timeout: 90000 },
   async (t) => {
     const bundle = await build({
       stdin: {
-        contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {BillingPanel} from './src/components/billing-panel'; const root=createRoot(document.getElementById('root')); window.showCustomer=(id)=>root.render(<BillingPanel key={id} customerId={id} refreshKey={0}/>); window.showCustomer('cus_acme');`,
+        contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import {BillingPanel} from './src/components/billing-panel'; import {AdminPage} from './src/components/admin-page'; const root=createRoot(document.getElementById('root')); const customers=[{id:'cus_acme',name:'Acme test account'},{id:'cus_orbit',name:'Orbit test account'}]; window.showCustomer=(id)=>root.render(<BillingPanel key={id} customerId={id} refreshKey={0}/>); window.showAdmin=()=>root.render(<AdminPage customers={customers}/>); window.showAdmin();`,
         resolveDir: process.cwd(),
         loader: "tsx"
       },
@@ -169,21 +169,28 @@ test(
         return;
       }
       if (url.pathname === "/api/payments") {
+        const orbit = {
+          ...base,
+          customerId: "cus_orbit",
+          invoiceId: "inv_cus_orbit_2026-09"
+        };
+        const scope = url.searchParams.get("customerId");
         send(
-          url.searchParams.get("customerId") === "cus_acme"
-            ? [payment]
-            : [
-                {
-                  ...base,
-                  customerId: "cus_orbit",
-                  invoiceId: "inv_cus_orbit_2026-09"
-                }
-              ]
+          scope === null
+            ? [payment, orbit]
+            : scope === "cus_acme"
+              ? [payment]
+              : [orbit]
         );
         return;
       }
       if (url.pathname === "/api/payments/inbox") {
-        send(url.searchParams.get("customerId") === "cus_acme" ? inbox : []);
+        send(
+          url.searchParams.get("all") === "true" ||
+            url.searchParams.get("customerId") === "cus_acme"
+            ? inbox
+            : []
+        );
         return;
       }
       if (url.pathname.startsWith("/api/invoices/")) {
@@ -206,12 +213,29 @@ test(
         });
         return;
       }
+      if (url.pathname.endsWith("/debug-reset")) {
+        // Debug reset keeps the customer's card version.
+        payment = {
+          ...base,
+          methodVersion: payment.methodVersion,
+          generation: 2,
+          updatedAt: "2026-10-01T00:00:03Z"
+        };
+        queued = [];
+        send({ ...payment, attempts: [], timeline: [] });
+        return;
+      }
+      if (url.pathname.endsWith("/processor")) {
+        send({ invoiceId: payment.invoiceId, scenarios: queued });
+        return;
+      }
       if (url.pathname.endsWith("/scenarios")) {
         queued = body.scenarios;
         send({ invoiceId: payment.invoiceId, scenarios: queued });
         return;
       }
       if (url.pathname.endsWith("/collect")) {
+        queued = queued.slice(1);
         payment = {
           ...payment,
           status: "needs_review",
@@ -377,52 +401,78 @@ test(
     await cdp.send("Page.navigate", {
       url: `http://127.0.0.1:${server.address().port}/`
     });
-    await waitText("Acme test account");
-    await waitText("0/4 attempts");
-    assert.match(await text(), /Existing usage/);
-    await click("Payment details & controls");
-    await waitText("Durable recovery notice");
-    assert.match(await text(), /no real money or email/);
-    await evaluate(
-      "Array.from(document.querySelectorAll('summary')).find(s=>s.textContent.includes('Mock scenario controls')).click()"
+    const buttonDisabled = (label) =>
+      evaluate(
+        `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)}).disabled`
+      );
+    const tab = (label) =>
+      evaluate(
+        `Array.from(document.querySelectorAll('[role=tab]')).find(t=>t.textContent===${JSON.stringify(label)}).click()`
+      );
+    const dialogText = () =>
+      evaluate("document.querySelector('[role=dialog]')?.innerText ?? ''");
+
+    // Admin console: every customer's collection in one table.
+    // Customer names also appear in the filter dropdown; wait for table rows.
+    await until(
+      () =>
+        evaluate(
+          "['Acme','Orbit'].every(n=>Array.from(document.querySelectorAll('tbody tr')).some(r=>r.textContent.includes(n)))"
+        ),
+      "admin collection rows"
     );
+    assert.match(await text(), /Needs review/);
     await evaluate(
-      "const s=document.querySelector('select[aria-label^=\"Mock scenario\"]'); s.value='4'; s.dispatchEvent(new Event('change',{bubbles:true}));"
+      "Array.from(document.querySelectorAll('tbody tr')).find(r=>r.textContent.includes('Acme')).querySelector('button').click()"
     );
-    await click("Save scenario queue");
-    await waitText("Mock queue saved: lost_response");
+    await waitText("Ready to collect");
+    assert.match(await dialogText(), /Acme test account · September 2026/);
+    assert.match(await dialogText(), /0 of 4 used/);
+    await tab("Mock controls");
+    await evaluate(
+      "const s=document.querySelector('select[aria-label=\"Mock scenario\"]'); s.value='4'; s.dispatchEvent(new Event('change',{bubbles:true}));"
+    );
+    // Choosing a scenario applies it immediately; there is no separate save.
+    await waitText("Mock queue set: lost response");
+    await waitText("Mock: next outcome lost response");
     assert.deepEqual(queued, ["lost_response"]);
-    await click("Collect payment");
-    await waitText("1/4 attempts");
-    await waitText("Webhook received, not applied");
-    await waitText("Workflow: complete");
-    assert.match(await text(), /Financial: needs review/);
-    assert.equal(
-      await evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Collect payment').disabled"
-      ),
-      true
+    await click("Collect");
+    await waitText("1 of 4 used");
+    await until(
+      async () => !(await text()).includes("Mock: next outcome"),
+      "queue consumed by the charge"
     );
-    await evaluate(
-      "Array.from(document.querySelectorAll('summary')).find(s=>s.textContent.includes('Attempt 1')).click()"
-    );
+    await waitText("Result unknown · reconcile");
+    await waitText("Collect blocked: $5.00 held for an unresolved charge");
+    assert.equal(await buttonDisabled("Collect"), true);
+    await tab("Activity");
+    await waitText("Durable recovery notice");
+    await tab("Debug");
     await waitText("stable-original-key");
-    await click("Reconcile payments");
-    await waitText("attempt-1: unresolved");
-    assert.match(await text(), /0 internal ledger issues/);
-    assert.match(await text(), /unapplied — retry reconciliation/);
-    assert.equal(
-      calls.findLast((c) => c.path === "/api/payments/reconcile").body.resume,
-      false
+    await waitText("workflow-ended");
+    await click("Reconcile");
+    await waitText("attempt attempt-1: unresolved");
+    assert.match(await text(), /event inbox-not-applied: unapplied/);
+    assert.deepEqual(
+      calls.findLast((c) => c.path === "/api/payments/reconcile").body,
+      { invoiceId: payment.invoiceId, resume: false }
     );
+    await click("Reconcile + resume");
+    await until(
+      () =>
+        calls.findLast((c) => c.path === "/api/payments/reconcile").body
+          .resume === true,
+      "resume reconciliation"
+    );
+    await tab("Mock controls");
     await click("Simulate card update");
-    await waitText("version 2 for this customer");
+    await waitText("Card updated to version 2.");
     assert.deepEqual(
       calls.findLast((c) => c.path === "/api/payments/method").body,
       { customerId: "cus_acme", expectedVersion: 1 }
     );
     failReconcile = true;
-    await click("Reconcile payments");
+    await click("Reconcile");
     await waitText("Mock reconciliation unavailable");
     // Late financial success is visible without restarting the completed Workflow.
     payment = {
@@ -431,43 +481,88 @@ test(
       paidCents: 500,
       reservedCents: 0,
       balanceCents: 0,
+      creditableCents: 0,
       needsAttention: 0,
       updatedAt: "2026-10-01T00:00:02Z"
     };
     inbox = [];
-    await waitText("Financial: paid");
-    await waitText("0 invoices · 0 unapplied events");
-    assert.equal(
-      await evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Collect payment').disabled"
-      ),
-      true
+    await waitText("Paid in full");
+    assert.equal(await buttonDisabled("Collect"), true);
+    failReconcile = false;
+    delayReconcile = true;
+    await click("Reconcile");
+    await until(() => Boolean(releaseReconcile), "delayed reconciliation");
+    await waitText("Reconciling…");
+    assert.equal(await buttonDisabled("Reconcile"), true);
+    assert.equal(await buttonDisabled("Simulate card update"), true);
+    // Closing mid-request must not surface the late result anywhere.
+    await evaluate(
+      "document.querySelector('[role=dialog] button[aria-label=Close]').click()"
     );
-    // Retain all legacy billing line items and approved-credit details.
+    await until(async () => !(await dialogText()), "dialog closed");
+    releaseReconcile();
+    delayReconcile = false;
+    releaseReconcile = undefined;
+    await sleep(300);
+    assert.doesNotMatch(await text(), /Reconciled \d+ events/);
+    await click("Reconcile all");
+    await until(
+      () =>
+        calls.findLast((c) => c.path === "/api/payments/reconcile").body
+          .invoiceId === undefined,
+      "reconcile all"
+    );
+
+    // Debug reset needs an explicit confirmation, then reopens the invoice.
+    await evaluate(
+      "Array.from(document.querySelectorAll('tbody tr')).find(r=>r.textContent.includes('Acme')).querySelector('button').click()"
+    );
+    await waitText("Paid in full");
+    await tab("Debug");
+    await click("Reset to unpaid");
+    await waitText("Credits stay.");
+    await click("Cancel");
+    await until(
+      async () => !(await text()).includes("Credits stay."),
+      "reset cancelled"
+    );
+    assert.equal(
+      calls.filter((c) => c.path.endsWith("/debug-reset")).length,
+      0
+    );
+    await click("Reset to unpaid");
+    await click("Reset");
+    await waitText("Reset to unpaid. Payment history cleared.");
+    await waitText("Ready to collect");
+    await waitText("0 of 4 used");
+    assert.equal(
+      calls.filter((c) => c.path.endsWith("/debug-reset")).length,
+      1
+    );
+    await evaluate(
+      "document.querySelector('[role=dialog] button[aria-label=Close]').click()"
+    );
+    await until(async () => !(await dialogText()), "dialog closed after reset");
+
+    // Customer view: plain status, no operator controls.
+    await evaluate("window.showCustomer('cus_acme')");
+    await waitText("Card on file · v2");
+    assert.match(await text(), /Existing usage/);
+    assert.match(await text(), /Due\s+\$5\.00/);
+    assert.doesNotMatch(
+      await text(),
+      /Collect|Reconcile|Workflow|attempt|needs review|Mock/i
+    );
     await evaluate(
       "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('September 2026')).click()"
     );
     await waitText("Existing invoice line");
     await waitText("Existing approved credit");
-    failReconcile = false;
-    delayReconcile = true;
-    await click("Reconcile payments");
-    await until(
-      () => Boolean(releaseReconcile),
-      "delayed old customer mutation"
-    );
-    await waitText("Reconciling…");
-    assert.equal(
-      await evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Reconcile payments').disabled"
-      ),
-      true
-    );
-    assert.equal(
-      await evaluate(
-        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Simulate card update').disabled"
-      ),
-      true
+    await click("Update card");
+    await waitText("Card updated.");
+    assert.deepEqual(
+      calls.findLast((c) => c.path === "/api/payments/method").body,
+      { customerId: "cus_acme", expectedVersion: 2 }
     );
     delayCustomer = "cus_acme";
     await click("Refresh");
@@ -475,11 +570,7 @@ test(
     await evaluate("window.showCustomer('cus_orbit')");
     await waitText("Orbit test account");
     releaseCustomer();
-    releaseReconcile();
     await sleep(300);
-    assert.doesNotMatch(
-      await text(),
-      /Acme test account|Mock reconciliation unavailable|workflow-ended|Reconciliation finished/
-    );
+    assert.doesNotMatch(await text(), /Acme test account|Card updated/);
   }
 );

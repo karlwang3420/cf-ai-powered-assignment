@@ -50,7 +50,8 @@ async function files(directory) {
 }
 
 // Fixture-only delay of a real pending charge. No production force-outcome endpoint,
-// immutable payload changes, fake webhook, or test timing override in production code.
+// immutable payload changes or fake webhook. payment-test mode runs demo waits at
+// PAYMENT_TIME_SCALE 0.2 (6s pending checks, 6s card wait, 0.6/1.2/1.8s dunning).
 async function seedLateProcessor(directory, attempt) {
   const script = (
     await build({
@@ -132,7 +133,8 @@ async function seedLateProcessor(directory, attempt) {
         .prepare(
           "UPDATE processor_keys SET resolve_at = ? WHERE idempotency_key = ? AND scenario = 'pending'"
         )
-        .run(Date.now() + 140_000, attempt.idempotencyKey).changes,
+        // Resolve after Vite boot plus three scaled 6s checks reach needs_review.
+        .run(Date.now() + 60_000, attempt.idempotencyKey).changes,
       1
     );
   } finally {

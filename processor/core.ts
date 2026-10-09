@@ -468,6 +468,23 @@ export class Processor {
         );
         return json({ invoiceId, scenarios: value.scenarios });
       }
+      if (request.method === "POST" && path === "/demo/reset") {
+        // Local debug reset: forget this invoice's keys, deliveries and queue so
+        // a fresh attempt 1 cannot replay the old charge.
+        const value = object(await body(request));
+        fields(value, ["invoiceId"]);
+        const invoiceId = identity(value.invoiceId, "invoiceId");
+        for (const table of [
+          "processor_keys",
+          "processor_outbox",
+          "processor_scenarios"
+        ])
+          this.storage.sql.exec(
+            `DELETE FROM ${table} WHERE invoice_id = ?`,
+            invoiceId
+          );
+        return json({ invoiceId, reset: true });
+      }
       if (request.method === "GET" && path === "/demo/inspect") {
         const invoiceId = identity(
           url.searchParams.get("invoiceId"),

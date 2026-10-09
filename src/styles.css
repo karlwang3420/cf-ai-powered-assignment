@@ -11,3 +11,17 @@ body,
   height: 100%;
   margin: 0;
 }
+
+/* Scale the whole UI from Full HD to 4K. Kumo sets text sizes in px, so
+   restate them in rem; spacing, widths and icons are already rem-based. */
+@theme {
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+}
+
+html {
+  /* 16px up to ~1536px wide, 18px at 1920, ~21px at 2560, 28px at 3840 */
+  font-size: clamp(16px, calc(8px + 0.5208vw), 28px);
+}

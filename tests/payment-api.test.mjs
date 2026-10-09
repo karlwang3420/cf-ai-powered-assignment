@@ -86,7 +86,7 @@ async function setup(t) {
   return { env, inv, owner, attempt, outcome, events, call, event, send };
 }
 
-test("payment inbox read requires one customer scope and omits applied and other-customer events", async (t) => {
+test("payment inbox read requires one customer scope or explicit all, and omits applied and other-customer events", async (t) => {
   const { env, outcome, call } = await setup(t);
   await receivePaymentWebhook(env.DB, "acme-unapplied", outcome);
   await receivePaymentWebhook(env.DB, "acme-applied", outcome);
@@ -125,6 +125,15 @@ test("payment inbox read requires one customer scope and omits applied and other
     assert.equal((await call("GET", `/inbox${query}`)).status, 400);
   }
   assert.equal((await call("GET", "/inbox?customerId=missing")).status, 404);
+  assert.deepEqual(
+    (await call("GET", "/inbox?all=true")).data.map((e) => e.eventId),
+    ["acme-unapplied", "orbit-unapplied"]
+  );
+  assert.equal(
+    (await call("GET", "/inbox?all=true&customerId=cus_acme")).data.length,
+    1,
+    "an explicit customer scope still wins"
+  );
 });
 
 test("payment API authenticates before receipt and validates full attempt identity", async (t) => {
@@ -287,4 +296,95 @@ test("payment attention API includes prepared reservations and removes them afte
   assert.equal((await send()).data.applied, true);
   assert.deepEqual((await call("GET", "?needsAttention=true")).data, []);
   assert.equal((await call("GET", `/${inv.id}`)).data.needsAttention, 0);
+});
+
+test("debug reset clears one invoice's payment history atomically, processor first, and keeps others immutable", async (t) => {
+  const { env, inv, outcome, call, send } = await setup(t);
+  // A second customer's paid invoice must be untouched by the reset.
+  const other = await invoice(env.DB, "cus_orbit", "2026-09");
+  const otherOwner = await claimCollection(env.DB, other.id, 0);
+  const { attempt: otherAttempt } = await preparePaymentAttempt(
+    env.DB,
+    otherOwner
+  );
+  await receivePaymentWebhook(env.DB, "orbit-paid", {
+    ...chargePayload(otherAttempt),
+    processorPaymentId: "orbit-payment",
+    status: "succeeded"
+  });
+  await applyPaymentWebhook(env.DB, "orbit-paid");
+  assert.equal((await send()).status, 202);
+  const ar = async (customer) =>
+    (
+      await env.DB.prepare(
+        "SELECT COALESCE(SUM(amount_cents), 0) AS v FROM ledger_entries WHERE customer_id = ? AND account = 'accounts_receivable'"
+      )
+        .bind(customer)
+        .first()
+    ).v;
+  const arBefore = await ar("cus_acme");
+  assert.equal((await getPaymentCollection(env.DB, inv.id)).status, "paid");
+
+  const resets = [];
+  let processorFails = true;
+  env.PAYMENT_PROCESSOR.fetch = async (request) => {
+    if (new URL(request.url).pathname === "/demo/reset") {
+      resets.push(await request.json());
+      return processorFails
+        ? Response.json({ error: {} }, { status: 503 })
+        : Response.json({ reset: true });
+    }
+    return Response.json({ charge: outcome });
+  };
+  const failed = await call("POST", `/${inv.id}/debug-reset`);
+  assert.equal(failed.status, 409);
+  assert.equal((await getPaymentCollection(env.DB, inv.id)).status, "paid");
+
+  processorFails = false;
+  const reset = await call("POST", `/${inv.id}/debug-reset`);
+  assert.equal(reset.status, 200);
+  assert.deepEqual(resets.at(-1), { invoiceId: inv.id });
+  assert.equal(reset.data.status, "open");
+  assert.equal(reset.data.paidCents, 0);
+  assert.equal(reset.data.reservedCents, 0);
+  assert.equal(reset.data.attemptsUsed, 0);
+  assert.equal(reset.data.generation, 2);
+  assert.equal(reset.data.attempts.length, 0);
+  assert.deepEqual(
+    reset.data.timeline.map((e) => e.kind),
+    ["open", "debug_reset"]
+  );
+  assert.equal(
+    (await ar("cus_acme")) - arBefore,
+    outcome.amountCents,
+    "payment posting removed, receivable restored"
+  );
+  const cash = await env.DB.prepare(
+    "SELECT customer_id AS c, SUM(amount_cents) AS v FROM ledger_entries WHERE account = 'cash' GROUP BY customer_id"
+  ).all();
+  assert.deepEqual(cash.results, [
+    { c: "cus_orbit", v: otherAttempt.amountCents }
+  ]);
+  assert.deepEqual(
+    (await listPaymentInbox(env.DB, false)).map((e) => e.eventId),
+    ["orbit-paid"]
+  );
+  assert.equal((await getPaymentCollection(env.DB, other.id)).status, "paid");
+  // The unlock is gone: history is immutable again for every invoice.
+  for (const sql of [
+    "DELETE FROM payments",
+    "DELETE FROM payment_attempts",
+    "DELETE FROM payment_timeline",
+    "DELETE FROM payment_webhook_inbox",
+    "DELETE FROM ledger_entries WHERE account = 'cash'"
+  ])
+    await assert.rejects(env.DB.prepare(sql).run(), /immutable/);
+  // A fresh campaign starts again at attempt 1 with the full budget.
+  const owner = await claimCollection(env.DB, inv.id, reset.data.generation);
+  const { attempt } = await preparePaymentAttempt(env.DB, owner);
+  assert.equal(attempt.attemptNumber, 1);
+  assert.equal(
+    (await getPaymentCollection(env.DB, inv.id)).attemptsRemaining,
+    3
+  );
 });

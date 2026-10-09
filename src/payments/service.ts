@@ -2,6 +2,7 @@ import {
   applyPaymentOutcome,
   applyPaymentWebhook,
   claimCollection,
+  debugResetPayment,
   getPaymentCollection,
   listPaymentCollections,
   listPaymentInbox,
@@ -26,6 +27,8 @@ export type PaymentEnv = {
   PAYMENT_PROCESSOR: Pick<Fetcher, "fetch">;
   PROCESSOR_TOKEN: string;
   PROCESSOR_WEBHOOK_SECRET: string;
+  /** Test-only multiplier (0–1] for demo waits; unset means real demo timing. */
+  PAYMENT_TIME_SCALE?: string;
 };
 
 export function paymentLog(
@@ -292,6 +295,33 @@ function ownerOf(
     ownerId: c.ownerId!,
     workflowId: c.workflowId!
   };
+}
+
+/**
+ * Local debug reset to unpaid. Processor state is cleared first so a failure
+ * leaves D1 untouched and the reset can simply be retried.
+ */
+export async function debugResetCollection(env: PaymentEnv, invoiceId: string) {
+  const c = await getPaymentCollection(env.DB, invoiceId);
+  if (c.workflowId)
+    try {
+      await (await env.PAYMENT_WORKFLOW.get(c.workflowId)).terminate();
+    } catch {
+      // Already finished or unknown; the generation bump fences it anyway.
+    }
+  const response = await processorRequest(env, "/demo/reset", "POST", {
+    invoiceId
+  });
+  if (!response.ok)
+    throw new BillingError(
+      "conflict",
+      `processor reset failed (${response.status}); nothing was changed`
+    );
+  paymentLog("payment_debug_reset", {
+    invoiceId,
+    workflowInstanceId: c.workflowId
+  });
+  return debugResetPayment(env.DB, invoiceId);
 }
 
 /** Lost create responses and concurrent callers always reuse the D1 generation ID. */

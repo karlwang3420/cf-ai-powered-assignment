@@ -21,6 +21,13 @@ export default defineConfig(({ mode }) => {
         ...(isolated
           ? {
               persistState: { path: process.env.PAYMENT_TEST_PERSIST! },
+              // Shorten demo waits (30s pending/card, 3/6/9s dunning) for tests.
+              config: (config) => ({
+                vars: {
+                  ...config.vars,
+                  PAYMENT_TIME_SCALE: process.env.PAYMENT_TIME_SCALE ?? "0.2"
+                }
+              }),
               remoteBindings: false,
               inspectorPort: false
             }

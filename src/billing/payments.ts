@@ -172,6 +172,50 @@ export async function getPaymentCollection(
   };
 }
 
+/**
+ * Local debug only: clear one invoice's payment history and return it to
+ * unpaid with a fresh attempt budget. Credits and invoice lines are kept.
+ * The no-delete triggers allow this only while the invoice is unlocked inside
+ * this batch; the new generation fences out steps from any older Workflow.
+ */
+export async function debugResetPayment(
+  db: D1Database,
+  invoiceId: string,
+  now = new Date()
+): Promise<PaymentDetail> {
+  await getPaymentCollection(db, invoiceId);
+  const at = now.toISOString();
+  const forInvoice = (sql: string) => db.prepare(sql).bind(invoiceId);
+  await db.batch([
+    forInvoice("INSERT INTO payment_debug_unlock (invoice_id) VALUES (?)"),
+    forInvoice(`DELETE FROM ledger_entries WHERE account IN ('cash', 'accounts_receivable')
+      AND transaction_id IN (SELECT 'payment:' || processor_payment_id FROM payments WHERE invoice_id = ?)`),
+    forInvoice("DELETE FROM payments WHERE invoice_id = ?"),
+    forInvoice("DELETE FROM payment_reservations WHERE invoice_id = ?"),
+    forInvoice("DELETE FROM payment_attempts WHERE invoice_id = ?"),
+    forInvoice(
+      "DELETE FROM payment_webhook_inbox WHERE json_extract(payload, '$.invoiceId') = ?"
+    ),
+    forInvoice("DELETE FROM payment_timeline WHERE invoice_id = ?"),
+    db
+      .prepare(`UPDATE payment_collections SET
+      status = CASE WHEN (SELECT total_cents - credited_cents FROM payment_balances WHERE invoice_id = ?1) <= 0
+        THEN 'settled' ELSE 'open' END,
+      attempts_used = 0, generation = generation + 1, owner_id = NULL, owner_active = 0,
+      workflow_id = NULL, has_conflict = 0, updated_at = ?2
+      WHERE invoice_id = ?1`)
+      .bind(invoiceId, at),
+    db
+      .prepare(`INSERT INTO payment_timeline (id, invoice_id, generation, kind, message, created_at)
+      SELECT 'debug_reset:' || generation, invoice_id, generation, 'debug_reset',
+        'Debug reset: payment history cleared', ?2
+      FROM payment_collections WHERE invoice_id = ?1`)
+      .bind(invoiceId, at),
+    forInvoice("DELETE FROM payment_debug_unlock WHERE invoice_id = ?")
+  ]);
+  return getPaymentCollection(db, invoiceId);
+}
+
 export async function listPaymentCollections(
   db: D1Database,
   customerId?: string

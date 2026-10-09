@@ -74,6 +74,9 @@ export const api = {
     request<PaymentInboxEvent[]>(
       `/api/payments/inbox?customerId=${encodeURIComponent(customerId)}`
     ),
+  allPayments: () => request<PaymentCollection[]>("/api/payments"),
+  allPaymentInbox: () =>
+    request<PaymentInboxEvent[]>("/api/payments/inbox?all=true"),
   payment: (id: string) => request<PaymentDetail>(paymentPath(id)),
   paymentRun: (id: string) => request<PaymentRun>(`${paymentPath(id)}/run`),
   collectPayment: (id: string) =>
@@ -81,7 +84,8 @@ export const api = {
       `${paymentPath(id)}/collect`,
       { method: "POST" }
     ),
-  reconcilePayments: (invoiceId: string, resume = false) =>
+  /** Omit invoiceId to reconcile every invoice and unapplied event. */
+  reconcilePayments: (invoiceId?: string, resume = false) =>
     request<PaymentReconciliation>(
       "/api/payments/reconcile",
       jsonBody("POST", { invoiceId, resume })
@@ -91,6 +95,14 @@ export const api = {
       "/api/payments/method",
       jsonBody("POST", { customerId, expectedVersion })
     ),
+  /** Local debug only: clear payment history and return to unpaid. */
+  debugResetPayment: (id: string) =>
+    request<PaymentDetail>(`${paymentPath(id)}/debug-reset`, {
+      method: "POST"
+    }),
+  /** Mock processor's remaining outcome queue for this invoice. */
+  paymentProcessor: (id: string) =>
+    request<{ scenarios: ProcessorScenario[] }>(`${paymentPath(id)}/processor`),
   paymentScenarios: (id: string, scenarios: ProcessorScenario[]) =>
     request<{ invoiceId: string; scenarios: ProcessorScenario[] }>(
       `${paymentPath(id)}/scenarios`,

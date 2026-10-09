@@ -64,7 +64,7 @@ export function ToolPart({
     return (
       <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning space-y-2">
         <div className="flex items-center gap-2">
-          <HandCoinsIcon size={16} className="text-kumo-warning" />
+          <HandCoinsIcon size="1rem" className="text-kumo-warning" />
           <Text size="sm" bold>
             Approve credit of {creditSummary(credit)}?
           </Text>
@@ -78,7 +78,7 @@ export function ToolPart({
           <Button
             variant="primary"
             size="sm"
-            icon={<CheckCircleIcon size={14} />}
+            icon={<CheckCircleIcon size="0.875rem" />}
             onClick={() =>
               approvalId && onApproval({ id: approvalId, approved: true })
             }
@@ -88,7 +88,7 @@ export function ToolPart({
           <Button
             variant="secondary"
             size="sm"
-            icon={<XCircleIcon size={14} />}
+            icon={<XCircleIcon size="0.875rem" />}
             onClick={() =>
               approvalId && onApproval({ id: approvalId, approved: false })
             }
@@ -103,7 +103,7 @@ export function ToolPart({
   if (part.state === "output-denied") {
     return (
       <div className="flex items-center gap-2 px-1">
-        <XCircleIcon size={14} className="text-kumo-danger" />
+        <XCircleIcon size="0.875rem" className="text-kumo-danger" />
         <Text size="xs" variant="secondary">
           {isCredit
             ? `Credit of ${creditSummary(credit)} rejected`
@@ -117,7 +117,7 @@ export function ToolPart({
     return (
       <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-danger">
         <div className="flex items-center gap-2">
-          <XCircleIcon size={14} className="text-kumo-danger" />
+          <XCircleIcon size="0.875rem" className="text-kumo-danger" />
           <Text size="xs" bold>
             {isCredit
               ? `Credit of ${creditSummary(credit)} not applied`
@@ -135,7 +135,7 @@ export function ToolPart({
     if (isCredit) {
       return (
         <div className="flex items-center gap-2 px-1 text-kumo-success">
-          <CheckCircleIcon size={14} />
+          <CheckCircleIcon size="0.875rem" />
           <Text size="xs">Credit of {creditSummary(credit)} applied</Text>
         </div>
       );
@@ -144,7 +144,7 @@ export function ToolPart({
     return (
       <details className="max-w-[85%] px-1 group">
         <summary className="flex items-center gap-2 cursor-pointer select-none list-none">
-          <MagnifyingGlassIcon size={14} className="text-kumo-inactive" />
+          <MagnifyingGlassIcon size="0.875rem" className="text-kumo-inactive" />
           <Text size="xs" variant="secondary">
             {label}
             {describeInput(part.input) && ` (${describeInput(part.input)})`}
@@ -161,7 +161,7 @@ export function ToolPart({
 
   return (
     <div className="flex items-center gap-2 px-1">
-      <GearIcon size={14} className="text-kumo-inactive animate-spin" />
+      <GearIcon size="0.875rem" className="text-kumo-inactive animate-spin" />
       <Text size="xs" variant="secondary">
         {label}…
       </Text>

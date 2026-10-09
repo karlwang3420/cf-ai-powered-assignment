@@ -94,6 +94,70 @@ export async function checkPaymentLayout(origin) {
       );
       return result.result.value;
     };
+    const measure = (width, label) =>
+      evaluate(`({scrollWidth:document.documentElement.scrollWidth,
+        controls:[...document.querySelectorAll('header select,header button,header a')].filter(e=>e.offsetParent).map(e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}}),
+        overflow:[...document.querySelectorAll('main, main aside, main section, main button, [role=dialog], [role=dialog] button, [role=dialog] dd')].filter(e=>e.clientWidth>0&&e.scrollWidth>e.clientWidth+2).map(e=>e.tagName+':'+e.textContent.slice(0,80)),
+        dialog:(()=>{const d=document.querySelector('[role=dialog]');if(!d)return null;const r=d.getBoundingClientRect();return {left:r.left,right:r.right}})()})`).then(
+        (layout) => {
+          assert.equal(layout.scrollWidth, width, label);
+          assert.ok(
+            layout.controls.every(
+              (r) => r.left >= 0 && r.right <= width && r.width > 0
+            ),
+            label
+          );
+          assert.deepEqual(layout.overflow, [], label);
+          if (layout.dialog)
+            assert.ok(
+              layout.dialog.left >= 0 && layout.dialog.right <= width,
+              label
+            );
+        }
+      );
+    const sizes = async (check) => {
+      for (const width of [390, 1280]) {
+        await send("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 900,
+          deviceScaleFactor: 1,
+          mobile: false
+        });
+        for (const mode of ["light", "dark"]) {
+          await evaluate(`document.documentElement.dataset.mode='${mode}'`);
+          await sleep(200);
+          await check(`${width} ${mode}`, width);
+        }
+      }
+    };
+
+    // Admin console with the long-ID review invoice open on every dialog tab.
+    await send("Page.navigate", { url: `${origin}/admin` });
+    await until(
+      () =>
+        evaluate(
+          "Array.from(document.querySelectorAll('tbody tr')).some(r=>r.cells[0].textContent==='late')"
+        ),
+      "admin collections"
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('tbody tr')).find(r=>r.cells[0].textContent==='late').querySelector('button').click()"
+    );
+    await until(
+      () => evaluate("!!document.querySelector('[role=dialog]')"),
+      "dialog"
+    );
+    await sizes(async (label, width) => {
+      for (const tab of ["Activity", "Mock controls", "Debug"]) {
+        await evaluate(
+          `Array.from(document.querySelectorAll('[role=tab]')).find(t=>t.textContent===${JSON.stringify(tab)}).click()`
+        );
+        await sleep(200);
+        await measure(width, `${label} admin ${tab}`);
+      }
+    });
+
+    // Customer view with an exceptionally long customer name.
     await send("Page.navigate", { url: origin });
     await until(
       () =>
@@ -104,46 +168,17 @@ export async function checkPaymentLayout(origin) {
       `(()=>{const s=document.querySelector('header select');s.value='test_late';s.dispatchEvent(new Event('change',{bubbles:true}));})()`
     );
     await until(
-      () =>
-        evaluate(
-          "document.body.innerText.includes('Payment details & controls')"
-        ),
-      "invoice"
+      () => evaluate("document.body.innerText.includes('Card on file')"),
+      "customer invoice"
     );
-    await evaluate(
-      `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Payment details & controls')).click()`
-    );
-    await until(
-      () => evaluate("document.body.innerText.includes('Correlation IDs')"),
-      "details"
-    );
-    for (const width of [390, 1280]) {
-      await send("Emulation.setDeviceMetricsOverride", {
-        width,
-        height: 900,
-        deviceScaleFactor: 1,
-        mobile: false
-      });
-      for (const mode of ["light", "dark"]) {
-        await evaluate(
-          `(()=>{document.documentElement.dataset.mode='${mode}';const s=document.querySelector('header select');s.options[s.selectedIndex].text='Very long enterprise customer name with an exceptionally long billing identifier';for(const d of document.querySelectorAll('details'))d.open=true;})()`
-        );
-        await sleep(200);
-        const layout =
-          await evaluate(`({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,
-          controls:[...document.querySelectorAll('header select,header button')].map(e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,width:r.width}}),
-          overflow:[...document.querySelectorAll('main, main aside, main section, main button')].filter(e=>e.clientWidth>0&&e.scrollWidth>e.clientWidth+2).map(e=>e.tagName+':'+e.textContent.slice(0,80))})`);
-        assert.equal(layout.scrollWidth, width, `${width} ${mode}`);
-        assert.ok(
-          layout.controls.every(
-            (r) => r.left >= 0 && r.right <= width && r.width > 0
-          )
-        );
-        assert.deepEqual(layout.overflow, [], `${width} ${mode}`);
-      }
-    }
+    await sizes(async (label, width) => {
+      await evaluate(
+        `(()=>{const s=document.querySelector('header select');s.options[s.selectedIndex].text='Very long enterprise customer name with an exceptionally long billing identifier';})()`
+      );
+      await measure(width, `${label} customer`);
+    });
     console.log(
-      "PAYMENT_LAYOUT_OK: styled real app; 390/1280px; light/dark; long customer; expanded IDs; no clipped controls/overflow."
+      "PAYMENT_LAYOUT_OK: styled real app; admin dialog tabs + customer view; 390/1280px; light/dark; long customer; no clipped controls/overflow."
     );
   } finally {
     socket?.close();
