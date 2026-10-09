@@ -379,6 +379,11 @@ test("debug reset clears one invoice's payment history atomically, processor fir
     "DELETE FROM ledger_entries WHERE account = 'cash'"
   ])
     await assert.rejects(env.DB.prepare(sql).run(), /immutable/);
+  // Another invoice reaching the same generation can also be reset.
+  const orbitReset = await call("POST", `/${other.id}/debug-reset`);
+  assert.equal(orbitReset.status, 200);
+  assert.equal(orbitReset.data.generation, reset.data.generation);
+  assert.equal(orbitReset.data.status, "open");
   // A fresh campaign starts again at attempt 1 with the full budget.
   const owner = await claimCollection(env.DB, inv.id, reset.data.generation);
   const { attempt } = await preparePaymentAttempt(env.DB, owner);

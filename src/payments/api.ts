@@ -149,6 +149,13 @@ export async function handlePaymentApi(
         env,
         `/demo/inspect?invoiceId=${encodeURIComponent(invoiceId)}`
       );
+    if (request.method === "POST" && path[2] === "settle") {
+      const body = await bodyOf(request);
+      return processorRequest(env, "/demo/settle", "POST", {
+        invoiceId,
+        outcome: body.outcome
+      });
+    }
     if (request.method === "PUT" && path[2] === "scenarios") {
       const body = await bodyOf(request);
       return processorRequest(env, "/demo/scenarios", "PUT", {

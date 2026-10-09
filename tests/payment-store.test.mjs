@@ -709,3 +709,46 @@ for (const declineType of ["soft", "hard"]) {
     );
   });
 }
+
+test("webhook receipt and duplicate deliveries appear once each in the invoice activity", async (t) => {
+  const { db, id, owner } = await setup(t);
+  const a = await prepare(db, owner);
+  const declined = outcome(a, "declined", { declineType: "soft" });
+  assert.equal(
+    (await receivePaymentWebhook(db, "evt-a", declined, NOW)).status,
+    "received"
+  );
+  for (let i = 0; i < 2; i++)
+    assert.equal(
+      (await receivePaymentWebhook(db, "evt-a", declined, NOW)).status,
+      "duplicate"
+    );
+  await assert.rejects(
+    receivePaymentWebhook(db, "evt-a", outcome(a), NOW),
+    code("conflict")
+  );
+  const webhooks = (await getPaymentCollection(db, id)).timeline.filter((e) =>
+    e.kind.startsWith("webhook_")
+  );
+  assert.deepEqual(
+    webhooks.map((e) => [e.kind, e.attemptNumber]),
+    [
+      ["webhook_received", 1],
+      ["webhook_duplicate", 1]
+    ]
+  );
+  assert.equal(webhooks[0].message, "declined (soft) · event evt-a");
+  // Unknown invoices are still accepted into the inbox but add no activity.
+  await receivePaymentWebhook(
+    db,
+    "evt-foreign",
+    { ...declined, invoiceId: "inv_missing" },
+    NOW
+  );
+  assert.equal(
+    (await getPaymentCollection(db, id)).timeline.filter((e) =>
+      e.kind.startsWith("webhook_")
+    ).length,
+    2
+  );
+});

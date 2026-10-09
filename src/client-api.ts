@@ -100,6 +100,15 @@ export const api = {
     request<PaymentDetail>(`${paymentPath(id)}/debug-reset`, {
       method: "POST"
     }),
+  /** Mock processor decides this invoice's pending charge; the webhook follows. */
+  settlePendingCharge: (
+    id: string,
+    outcome: "succeeded" | "soft_decline" | "hard_decline"
+  ) =>
+    request<{ invoiceId: string }>(
+      `${paymentPath(id)}/settle`,
+      jsonBody("POST", { outcome })
+    ),
   /** Mock processor's remaining outcome queue for this invoice. */
   paymentProcessor: (id: string) =>
     request<{ scenarios: ProcessorScenario[] }>(`${paymentPath(id)}/processor`),

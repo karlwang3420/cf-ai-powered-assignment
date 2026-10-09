@@ -95,7 +95,8 @@ Two explicit **test-only fixtures** avoid adding unsafe production controls:
   key and payment ID stay unchanged. The test must observe needs-review,
   reserved money and an ended Workflow before its real alarm/signed callback
   posts late success. It does not forge a success webhook or force a terminal
-  outcome. The normal `unresolved_pending` preset never resolves by itself.
+  outcome. The normal `unresolved_pending` preset never resolves by itself; use
+  **Settle pending charge** to have the processor decide it.
 - A Vite transform local to the harness calls unchanged `issueCredit(env.DB)`
   with one fixed approved fixture while the real Workflow waits for a card.
   It exists only in the test-created server, not normal dev/build. This retains
@@ -149,8 +150,10 @@ processor success may pay it before you can select a different scenario.
 6. Pending normally succeeds after 2 seconds. Unresolved pending reaches
    needs-review after three 30-second checks and keeps its reservation. The
    admin **Needs review** / **Held** tiles include reservations and merchant unapplied
-   events, not merely Workflow failures. A real late result can still post
-   after the old Workflow ends; no unsafe manual force-success UI is provided.
+   events, not merely Workflow failures. A late result still posts after the
+   old Workflow ends: in **Mock controls**, **Settle pending charge** makes the
+   processor succeed or decline it and send its signed webhook. Succeeds moves
+   needs review to paid; a soft decline releases the hold so Collect works again.
 7. Use the **Activity** and **Debug** tabs for timeline, immutable keys, method versions, processor IDs,
    notices, deadlines and Workflow IDs. Continue polling financial state:
    Workflow completion alone is not payment proof.

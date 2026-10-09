@@ -63,8 +63,12 @@ function processor(scenarios) {
       posts++;
       const input = await request.json();
       requests.push(input);
+      // Same-key replay, flagged like the real mock processor does.
       if (charges.has(input.idempotencyKey))
-        return Response.json({ charge: charges.get(input.idempotencyKey) });
+        return Response.json({
+          charge: charges.get(input.idempotencyKey),
+          replayed: true
+        });
       const scenario = scenarios[Math.min(charges.size, scenarios.length - 1)];
       if (scenario === "unavailable")
         return new Response(null, { status: 503 });
@@ -154,6 +158,14 @@ test("PaymentWorkflow lost response retries immutable payload and posts once", a
     env.PAYMENT_PROCESSOR.requests[0],
     env.PAYMENT_PROCESSOR.requests[1]
   );
+  // The lost response and same-key replay are visible, not hidden behind "paid".
+  const { timeline } = await getPaymentCollection(env.DB, owner.invoiceId);
+  const transport = timeline.filter((e) => e.kind.startsWith("charge_"));
+  assert.deepEqual(
+    transport.map((e) => e.kind),
+    ["charge_unanswered", "charge_replayed"]
+  );
+  assert.match(transport[0].message, /HTTP 504/);
   assert.equal(
     (await env.DB.prepare("SELECT COUNT(*) AS n FROM payments").first()).n,
     1

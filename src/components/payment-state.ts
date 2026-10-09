@@ -63,7 +63,7 @@ export function paymentNextStep(payment: PaymentCollection): string {
     case "recovering":
       return "Confirming an unknown result";
     case "needs_review":
-      return "Result unknown · reconcile";
+      return "Result unknown · waiting for the processor";
     case "action_required":
       return "Waiting for a newer card";
     case "retrying":

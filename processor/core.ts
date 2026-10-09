@@ -55,6 +55,8 @@ type OutboxRow = {
 export const PENDING_DELAY_MS = 2_000;
 export const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_LEASE_MS = 30_000;
+const SETTLE_OUTCOMES = ["succeeded", "soft_decline", "hard_decline"] as const;
+type SettleOutcome = (typeof SETTLE_OUTCOMES)[number];
 const SCENARIOS: ProcessorScenario[] = [
   "success",
   "soft_decline",
@@ -467,6 +469,50 @@ export class Processor {
           JSON.stringify(value.scenarios)
         );
         return json({ invoiceId, scenarios: value.scenarios });
+      }
+      if (request.method === "POST" && path === "/demo/settle") {
+        // Demo control: the processor finally decides this invoice's pending
+        // charge. The merchant learns it only via the normal signed webhook
+        // or a status lookup; nothing on the merchant side is forced.
+        const value = object(await body(request));
+        fields(value, ["invoiceId", "outcome"]);
+        const invoiceId = identity(value.invoiceId, "invoiceId");
+        const outcome = value.outcome;
+        if (!SETTLE_OUTCOMES.includes(outcome as SettleOutcome))
+          invalid("outcome must be succeeded, soft_decline or hard_decline");
+        await this.arm();
+        const charge = this.storage.transactionSync(() => {
+          const row = this.rows<KeyRow>(
+            `SELECT * FROM processor_keys WHERE invoice_id = ?
+            AND json_extract(outcome_json, '$.status') = 'pending'
+            ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+            invoiceId
+          )[0];
+          if (!row)
+            throw new HttpError(
+              409,
+              "not_pending",
+              "No pending charge for this invoice"
+            );
+          const previous: ProcessorCharge = JSON.parse(row.outcome_json!);
+          const next: ProcessorCharge =
+            outcome === "succeeded"
+              ? { ...previous, status: "succeeded" }
+              : {
+                  ...previous,
+                  status: "declined",
+                  declineType: outcome === "soft_decline" ? "soft" : "hard"
+                };
+          this.storage.sql.exec(
+            "UPDATE processor_keys SET outcome_json = ?, resolve_at = NULL WHERE idempotency_key = ?",
+            JSON.stringify(next),
+            row.idempotency_key
+          );
+          this.enqueue(next, row.scenario);
+          return next;
+        });
+        await this.schedule();
+        return json({ invoiceId, charge });
       }
       if (request.method === "POST" && path === "/demo/reset") {
         // Local debug reset: forget this invoice's keys, deliveries and queue so

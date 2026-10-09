@@ -213,6 +213,10 @@ test(
         });
         return;
       }
+      if (url.pathname.endsWith("/settle")) {
+        send({ invoiceId: payment.invoiceId });
+        return;
+      }
       if (url.pathname.endsWith("/debug-reset")) {
         // Debug reset keeps the customer's card version.
         payment = {
@@ -442,9 +446,17 @@ test(
       async () => !(await text()).includes("Mock: next outcome"),
       "queue consumed by the charge"
     );
-    await waitText("Result unknown · reconcile");
+    await waitText("Result unknown · waiting for the processor");
     await waitText("Collect blocked: $5.00 held for an unresolved charge");
     assert.equal(await buttonDisabled("Collect"), true);
+    // An unresolved charge locks the queue but can be settled at the processor.
+    await tab("Mock controls");
+    await waitText("Locked while a charge is unresolved");
+    await click("Soft decline");
+    await waitText("Processor settled the charge: soft decline");
+    assert.deepEqual(calls.findLast((c) => c.path.endsWith("/settle")).body, {
+      outcome: "soft_decline"
+    });
     await tab("Activity");
     await waitText("Durable recovery notice");
     await tab("Debug");

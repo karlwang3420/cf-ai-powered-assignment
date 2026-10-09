@@ -249,17 +249,54 @@ export async function runPaymentCollection(
             paymentLog("processor_charge", identity, {
               attemptNumber: attempt.attemptNumber
             });
-            const response = await processorRequest(
-              env,
-              "/charges",
-              "POST",
-              chargePayload(attempt)
-            );
-            if (!response.ok)
+            // Transport notices make same-key recovery visible in the timeline.
+            // They are best-effort: a failed notice never changes the charge flow.
+            const notice = (
+              kind: "charge_unanswered" | "charge_replayed",
+              id: string,
+              message: string
+            ) =>
+              recordCollectionNotice(env.DB, owner, {
+                id: `${attempt.id}:g${owner.generation}:${id}`,
+                attemptNumber: attempt.attemptNumber,
+                kind,
+                message
+              }).catch(() => undefined);
+            let response: Response;
+            try {
+              response = await processorRequest(
+                env,
+                "/charges",
+                "POST",
+                chargePayload(attempt)
+              );
+            } catch (error) {
+              await notice(
+                "charge_unanswered",
+                `unanswered:${Date.now()}`,
+                "Charge got no response (timeout). Retrying with the same key."
+              );
+              throw error;
+            }
+            if (!response.ok) {
+              await notice(
+                "charge_unanswered",
+                `unanswered:${Date.now()}`,
+                `Charge got no usable response (HTTP ${response.status}). Retrying with the same key.`
+              );
               throw new Error(`processor HTTP ${response.status}`);
-            const outcome = parseOutcome(
-              ((await response.json()) as { charge: unknown }).charge
-            );
+            }
+            const body = (await response.json()) as {
+              charge: unknown;
+              replayed?: boolean;
+            };
+            const outcome = parseOutcome(body.charge);
+            if (body.replayed)
+              await notice(
+                "charge_replayed",
+                "replayed",
+                "Processor replayed the original charge for this key. No second charge."
+              );
             if (
               Object.entries(chargePayload(attempt)).some(
                 ([k, v]) => outcome[k as keyof typeof outcome] !== v

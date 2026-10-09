@@ -65,6 +65,8 @@ const queueIndex = (queue: ProcessorScenario[] | null) =>
         (s) => JSON.stringify(s.values) === JSON.stringify(queue)
       );
 
+// Seconds are enough to read; the list order comes from millisecond
+// timestamps plus insert order on the server, so it is stable regardless.
 const time = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-US", { hour12: false });
 
@@ -592,10 +594,48 @@ export function PaymentDialog({
                     </select>
                     {!canCollectPayment(payment) && (
                       <span className="block text-kumo-subtle">
-                        Only for invoices that can still be collected.
+                        {payment.reservedCents > 0
+                          ? "Locked while a charge is unresolved. Settle it below."
+                          : "Only for invoices that can still be collected."}
                       </span>
                     )}
                   </label>
+                  {payment.reservedCents > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-kumo-subtle">
+                        Settle pending charge ·{" "}
+                        {formatCents(payment.reservedCents)} · processor sends
+                        its webhook
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {(
+                          [
+                            ["succeeded", "Succeeds"],
+                            ["soft_decline", "Soft decline"],
+                            ["hard_decline", "Hard decline"]
+                          ] as const
+                        ).map(([outcome, label]) => (
+                          <Button
+                            key={outcome}
+                            size="sm"
+                            variant="secondary"
+                            disabled={disabled}
+                            onClick={() =>
+                              void act("Settling", async () => {
+                                await api.settlePendingCharge(
+                                  payment.invoiceId,
+                                  outcome
+                                );
+                                return `Processor settled the charge: ${label.toLowerCase()}. Waiting for its webhook.`;
+                              })
+                            }
+                          >
+                            {label}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-kumo-subtle">
                       Simulated card · version {payment.methodVersion}

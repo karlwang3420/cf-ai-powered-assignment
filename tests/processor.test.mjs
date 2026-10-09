@@ -611,3 +611,60 @@ test("processor debug reset forgets only that invoice so the same key charges af
     401
   );
 });
+
+test("processor demo settle resolves only a pending charge through the normal signed webhook", async (t) => {
+  const f = fixture(t);
+  assert.equal(
+    (
+      await f.call("/demo/settle", "POST", {
+        invoiceId: "inv_1",
+        outcome: "succeeded"
+      })
+    ).status,
+    409,
+    "nothing pending yet"
+  );
+  await f.scenario(["unresolved_pending"]);
+  const pending = await (await f.call("/charges", "POST", payload())).json();
+  assert.equal(pending.charge.status, "pending");
+  await f.tick();
+  assert.equal(f.deliveries.length, 1, "pending webhook");
+  assert.equal(
+    (
+      await f.call("/demo/settle", "POST", {
+        invoiceId: "inv_1",
+        outcome: "maybe"
+      })
+    ).status,
+    400
+  );
+  const settled = await (
+    await f.call("/demo/settle", "POST", {
+      invoiceId: "inv_1",
+      outcome: "soft_decline"
+    })
+  ).json();
+  assert.equal(settled.charge.status, "declined");
+  assert.equal(settled.charge.declineType, "soft");
+  assert.equal(
+    settled.charge.processorPaymentId,
+    pending.charge.processorPaymentId
+  );
+  const lookup = await (
+    await f.call("/charges?idempotencyKey=inv_1%3A1")
+  ).json();
+  assert.deepEqual(lookup.charge, settled.charge, "status lookup agrees");
+  await f.tick();
+  assert.equal(f.deliveries.length, 2);
+  assert.deepEqual(f.deliveries[1].event.charge, settled.charge);
+  assert.equal(
+    (
+      await f.call("/demo/settle", "POST", {
+        invoiceId: "inv_1",
+        outcome: "succeeded"
+      })
+    ).status,
+    409,
+    "terminal outcomes stay immutable"
+  );
+});

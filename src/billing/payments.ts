@@ -207,7 +207,7 @@ export async function debugResetPayment(
       .bind(invoiceId, at),
     db
       .prepare(`INSERT INTO payment_timeline (id, invoice_id, generation, kind, message, created_at)
-      SELECT 'debug_reset:' || generation, invoice_id, generation, 'debug_reset',
+      SELECT 'debug_reset:' || invoice_id || ':' || generation, invoice_id, generation, 'debug_reset',
         'Debug reset: payment history cleared', ?2
       FROM payment_collections WHERE invoice_id = ?1`)
       .bind(invoiceId, at),
@@ -490,7 +490,12 @@ export async function recordCollectionNotice(
   input: {
     id: string;
     attemptNumber: number;
-    kind: "retry_scheduled" | "card_update_requested" | "recovery_check";
+    kind:
+      | "retry_scheduled"
+      | "card_update_requested"
+      | "recovery_check"
+      | "charge_unanswered"
+      | "charge_replayed";
     message: string;
     deadlineAt?: string;
   },
@@ -500,9 +505,13 @@ export async function recordCollectionNotice(
   integer(input.attemptNumber, "attemptNumber");
   text(input.message, "message");
   if (
-    !["retry_scheduled", "card_update_requested", "recovery_check"].includes(
-      input.kind
-    )
+    ![
+      "retry_scheduled",
+      "card_update_requested",
+      "recovery_check",
+      "charge_unanswered",
+      "charge_replayed"
+    ].includes(input.kind)
   )
     throw new BillingError("invalid", "invalid notice kind");
   const deadline =
@@ -736,11 +745,41 @@ export async function receivePaymentWebhook(
 ): Promise<{ status: "received" | "duplicate" }> {
   const payload = canonicalOutcome(outcome);
   text(eventId, "eventId");
-  const result = await db
-    .prepare(`INSERT INTO payment_webhook_inbox (event_id, payload, received_at)
-    VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING`)
-    .bind(eventId, payload, now.toISOString())
-    .run();
+  const at = now.toISOString();
+  const result =
+    outcome.status === "declined" ? ` (${outcome.declineType})` : "";
+  // Activity entry for a known invoice only, and only for the payload stored
+  // under this event ID. Duplicate deliveries get one extra entry per event.
+  const activity = (id: string, kind: string, message: string) =>
+    db
+      .prepare(`INSERT INTO payment_timeline (id, invoice_id, generation, attempt_number, kind, message, created_at)
+      SELECT ?1, c.invoice_id, c.generation,
+        (SELECT attempt_number FROM payment_attempts WHERE id = ?3 AND invoice_id = c.invoice_id),
+        ?4, ?5, ?6 FROM payment_collections c
+      WHERE c.invoice_id = ?2
+        AND EXISTS (SELECT 1 FROM payment_webhook_inbox WHERE event_id = ?7 AND payload = ?8)
+      ON CONFLICT DO NOTHING`)
+      .bind(
+        id,
+        outcome.invoiceId,
+        outcome.attemptId,
+        kind,
+        message,
+        at,
+        eventId,
+        payload
+      );
+  const [inserted] = await db.batch([
+    db
+      .prepare(`INSERT INTO payment_webhook_inbox (event_id, payload, received_at)
+      VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING`)
+      .bind(eventId, payload, at),
+    activity(
+      `webhook:${eventId}`,
+      "webhook_received",
+      `${outcome.status}${result} · event ${eventId}`
+    )
+  ]);
   const stored = await db
     .prepare("SELECT payload FROM payment_webhook_inbox WHERE event_id = ?")
     .bind(eventId)
@@ -750,7 +789,13 @@ export async function receivePaymentWebhook(
       "conflict",
       "webhook event ID reused with different payload"
     );
-  return { status: result.meta.changes ? "received" : "duplicate" };
+  if (inserted.meta.changes) return { status: "received" };
+  await activity(
+    `webhook_duplicate:${eventId}`,
+    "webhook_duplicate",
+    `Same event ${eventId} delivered again; ignored`
+  ).run();
+  return { status: "duplicate" };
 }
 
 export async function listPaymentInbox(

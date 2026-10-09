@@ -296,8 +296,11 @@ Validate:
   nine scenario controls, indefinite key retention, durable alarms and signed
   callback delivery. Terminal outcomes cannot be force-edited. The lost-response
   scenario returns a deterministic 504 after committing success; it is not a
-  physical socket-disconnect test. Unresolved pending has no production
-  force-resolution control. No real money, email or card information exists.
+  physical socket-disconnect test. Unresolved pending stays pending until the
+  mock processor is told to decide it (**Mock controls → Settle pending
+  charge**, `POST /demo/settle`). That changes only processor state: the
+  merchant learns the outcome through the normal signed webhook or an
+  original-key lookup, and terminal outcomes still cannot be changed. No real money, email or card information exists.
 - **Runtime:** `src/payment-workflow.ts`, `src/payments/collection.ts` and
   `service.ts` run actual Workflow checkpoints, sleeps and events. Charge retries
   use two retries after the first call; original-key automatic recovery has
