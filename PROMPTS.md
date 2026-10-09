@@ -290,3 +290,43 @@
 > 
 > commit and push
 
+> [20:54:42 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-40ba6047-701c-46fb-8c04-06cc04f2c0a7.png
+> 
+> is this how i should perceive the complicated payment collection workflow?
+
+> [20:56:58 (UTC-04:00)] no, i think we need an admin view
+
+> [20:57:25 (UTC-04:00)] scatch the admin view first
+
+> [21:04:45 (UTC-04:00)] the right panel is still too word heavy. make a dialog appear with current status on top and action buttons
+> 
+> mock controls, logs, in there own sections in that dialog
+
+> [21:05:31 (UTC-04:00)] yes
+
+> [21:35:37 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-9687b868-842e-4b69-9bee-ebac57c12ca1.png
+> 
+> make the text bigger with RWD on full hd to 4k
+
+> [21:53:24 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-99baf015-c435-45e6-b25f-5cf8da8cb5db.png
+> 
+> i selected mock control to be unresolved pending -> manual review. but when i click collect the result is still paid
+
+> [21:53:55 (UTC-04:00)] and what is save queue?
+
+> [21:58:46 (UTC-04:00)] need an debug button to reset payment status to unpaid
+
+> [22:11:13 (UTC-04:00)] when you do this test you always get stuck, last time i had to stop you after 17 mins
+
+> [22:12:53 (UTC-04:00)] again with the 1500s time out
+
+> [22:20:23 (UTC-04:00)] what do these tests acutally test? do you really need them?
+
+> [22:25:07 (UTC-04:00)] i am not really talking about the change this time. but as a whole. what is causing them to run for this long? the delay and auto retries?
+
+> [22:30:56 (UTC-04:00)] do 1, 2, 4. 
+> 
+> for 3 i think is unnecessary because it's not slowing down my computer. or we can do with batches instead of one at a time
+
+> [22:41:51 (UTC-04:00)] ok, commit
+
