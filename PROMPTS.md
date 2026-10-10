@@ -461,3 +461,25 @@
 
 > [11:22:50 (UTC-04:00)] and commit and push PRMOMTS
 
+> [13:07:47 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-0cdec1d1-da3c-4917-bf57-d45cdc85af57.png
+> 
+> something like this?
+
+> [13:38:57 (UTC-04:00)] i cannot find One-time PIN login
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-97677be6-6299-4619-813f-af07df669842.png
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-31c88612-d962-4e41-8d4d-807c6f925810.png
+
+> [13:41:24 (UTC-04:00)] done
+
+> [13:44:20 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-452e51e7-d046-492c-bca8-804fce87f81c.png
+> 
+> restless-snowflake-6555.cloudflareaccess.com
+
+> [13:48:44 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-8848b382-6cce-4528-9268-2925a4aa09bd.png
+
+> [14:12:02 (UTC-04:00)] what was the bug?
+
+> [14:13:15 (UTC-04:00)] commit
+

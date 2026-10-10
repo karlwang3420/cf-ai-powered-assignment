@@ -20,7 +20,7 @@ import {
   PROCESSOR_CALLBACK_ORIGIN,
   PROCESSOR_WEBHOOK_PATH
 } from "../src/payments/protocol.ts";
-import { resetDemo } from "../src/demo/reset.ts";
+import { destroyAndVerifyChat, resetDemo } from "../src/demo/reset.ts";
 import {
   admitSession,
   emptyDemoState,
@@ -527,6 +527,86 @@ function resetEnv(db, processorStatus = 200) {
     }
   };
 }
+
+test("chat teardown accepts only the SDK's intentional abort and verifies empty history", async () => {
+  for (const abort of [false, true]) {
+    let verified = false;
+    await destroyAndVerifyChat(
+      async () => {
+        if (abort) throw new Error("destroyed");
+      },
+      async () => {
+        verified = true;
+        return [];
+      }
+    );
+    assert.equal(verified, true);
+  }
+
+  for (const failure of [
+    new Error("agent unavailable"),
+    new Error("not destroyed"),
+    "destroyed"
+  ]) {
+    await assert.rejects(
+      destroyAndVerifyChat(
+        async () => {
+          throw failure;
+        },
+        async () => {
+          assert.fail("must not ignore a genuine failure");
+        }
+      ),
+      (error) => error === failure
+    );
+  }
+  let attempts = 0;
+  await destroyAndVerifyChat(
+    async () => {},
+    async () => {
+      if (++attempts < 3) throw new Error("destroyed");
+      return [];
+    }
+  );
+  assert.equal(
+    attempts,
+    3,
+    "verification reacquires after the scheduled abort"
+  );
+  attempts = 0;
+  await assert.rejects(
+    destroyAndVerifyChat(
+      async () => {},
+      async () => {
+        attempts++;
+        throw new Error("destroyed");
+      }
+    ),
+    /^Error: destroyed$/
+  );
+  assert.equal(attempts, 4, "reset retries are bounded");
+
+  for (const history of [[{ id: "old" }], null, {}]) {
+    await assert.rejects(
+      destroyAndVerifyChat(
+        async () => {
+          throw new Error("destroyed");
+        },
+        async () => history
+      ),
+      /chat history was not cleared/
+    );
+  }
+  await assert.rejects(
+    destroyAndVerifyChat(
+      async () => {},
+      async () => {
+        throw new Error("verification unavailable");
+      }
+    ),
+    /verification unavailable/
+  );
+});
 
 test("demo reset stops runs and clears the processor before rebuilding D1 and chats", async (t) => {
   const fresh = await database(t);

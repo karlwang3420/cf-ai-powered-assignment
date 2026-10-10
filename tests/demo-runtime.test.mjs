@@ -147,6 +147,18 @@ test(
           transform(code, id) {
             const file = id.replaceAll("\\", "/");
             if (file.endsWith("/src/server.ts")) {
+              // Miniflare can return cleanly before the SDK's scheduled abort.
+              // Force the production RPC teardown signal after actual deletion.
+              const agentSeam = "  maxPersistedMessages = 100;";
+              assert.ok(code.includes(agentSeam));
+              code = code.replace(
+                agentSeam,
+                `${agentSeam}
+  async destroy() {
+    await super.destroy();
+    throw new Error("destroyed");
+  }`
+              );
               const seam = "async fetch(request: Request, env: Env) {";
               assert.ok(code.includes(seam));
               return code.replace(

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { resetDemo } from "./reset";
+import { destroyAndVerifyChat, resetDemo } from "./reset";
 import {
   admitSession,
   emptyDemoState,
@@ -68,9 +68,24 @@ export class DemoSession extends DurableObject<Env> {
       // leaves the stores inconsistent, so every request retries it until done.
       this.ctx.storage.kv.put(RESET_PENDING, true);
       await resetDemo(this.env, DEMO_SQL, async (customerId) => {
-        await (
-          await getAgentByName(this.env.BillingAssistant, customerId)
-        ).destroy();
+        await destroyAndVerifyChat(
+          async () => {
+            await (
+              await getAgentByName(this.env.BillingAssistant, customerId)
+            ).destroy();
+          },
+          async () => {
+            const agent = await getAgentByName(
+              this.env.BillingAssistant,
+              customerId
+            );
+            const response = await agent.fetch(
+              new Request("https://chat.internal/get-messages")
+            );
+            if (!response.ok) throw new Error("could not verify chat teardown");
+            return response.json();
+          }
+        );
       });
       this.ctx.storage.kv.put("state", next());
       this.ctx.storage.kv.delete(RESET_PENDING);
