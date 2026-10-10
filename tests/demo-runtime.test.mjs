@@ -147,6 +147,18 @@ test(
           transform(code, id) {
             const file = id.replaceAll("\\", "/");
             if (file.endsWith("/src/server.ts")) {
+              // Miniflare can return cleanly before the SDK's scheduled abort.
+              // Force the production RPC teardown signal after actual deletion.
+              const agentSeam = "  maxPersistedMessages = 100;";
+              assert.ok(code.includes(agentSeam));
+              code = code.replace(
+                agentSeam,
+                `${agentSeam}
+  async destroy() {
+    await super.destroy();
+    throw new Error("destroyed");
+  }`
+              );
               const seam = "async fetch(request: Request, env: Env) {";
               assert.ok(code.includes(seam));
               return code.replace(
@@ -159,7 +171,8 @@ test(
               );
             }
             if (file.endsWith("/src/demo/reset.ts")) {
-              const seam = "  await rebuildDatabase(env.DB, scripts);";
+              const seam =
+                "  await rebuildDatabase(env.DB, scripts, migrations);";
               assert.ok(code.includes(seam));
               return code.replace(
                 seam,
@@ -217,6 +230,11 @@ ${seam}`
       month: "2026-09"
     });
     assert.equal(run.status, 202);
+    await eventually(
+      () => asAlice(`/invoice-runs/${run.body.id}`),
+      (r) => r.body.status === "complete"
+    );
+    await asAlice("/payments/inv_cus_acme_2026-09/collect", "POST");
     const paid = await eventually(
       () => asAlice("/payments/inv_cus_acme_2026-09"),
       (r) => r.body.status === "paid"
@@ -296,10 +314,15 @@ ${seam}`
     );
 
     // The processor forgot the old key: the same attempt charges afresh
-    await asAlice("/invoice-runs", "POST", {
+    const rerun = await asAlice("/invoice-runs", "POST", {
       customerId: "cus_acme",
       month: "2026-09"
     });
+    await eventually(
+      () => asAlice(`/invoice-runs/${rerun.body.id}`),
+      (r) => r.body.status === "complete"
+    );
+    await asAlice("/payments/inv_cus_acme_2026-09/collect", "POST");
     await eventually(
       () => asAlice("/payments/inv_cus_acme_2026-09"),
       (r) => r.body.status === "paid"

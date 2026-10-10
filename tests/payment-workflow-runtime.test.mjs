@@ -173,7 +173,8 @@ test(
     assert.equal(retried.requests[0].scenario, "outage");
     assert.equal(retried.requests[0].charge.status, "succeeded");
     assert.equal((await call(`/payments/${retryInvoice.id}`)).attemptsUsed, 1);
-    // A newly finalized invoice automatically launches its collection, no collect click.
+    // Running an invoice only finalizes it, so a mock outcome can be chosen
+    // before anything is charged; Collect starts the charge.
     const invoiceRun = await call("/invoice-runs", "POST", {
       customerId: "cus_orbit",
       month: "2026-09"
@@ -182,11 +183,17 @@ test(
       () => call(`/invoice-runs/${invoiceRun.id}`),
       (s) => s.status === "complete"
     );
-    const automatic = await eventually(
+    const finalized = await call("/payments/inv_cus_orbit_2026-09");
+    assert.deepEqual(
+      [finalized.status, finalized.attemptsUsed, finalized.workflowId],
+      ["open", 0, null]
+    );
+    await call("/payments/inv_cus_orbit_2026-09/collect", "POST");
+    const collected = await eventually(
       () => call("/payments/inv_cus_orbit_2026-09"),
       (c) => c.status === "paid"
     );
-    assert.equal(automatic.attemptsUsed, 1);
+    assert.equal(collected.attemptsUsed, 1);
     // Explorer is a real local route in the targeted upgrade, not a fabricated app screen.
     const explorer = await fetch(`${origin}/cdn-cgi/explorer`);
     assert.equal(explorer.status, 200);

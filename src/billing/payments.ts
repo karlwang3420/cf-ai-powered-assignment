@@ -64,6 +64,8 @@ export type PaymentCollection = {
   balanceCents: number;
   creditableCents: number;
   attemptsUsed: number;
+  /** 4 automatic attempts, plus one per manual retry. */
+  attemptLimit: number;
   attemptsRemaining: number;
   generation: number;
   ownerId: string | null;
@@ -84,7 +86,8 @@ const COLLECTION_SELECT = `SELECT c.invoice_id AS invoiceId, b.customer_id AS cu
  b.paid_cents AS paidCents, b.reserved_cents AS reservedCents,
  b.total_cents - b.credited_cents - b.paid_cents AS balanceCents,
  b.total_cents - b.credited_cents - b.paid_cents - b.reserved_cents AS creditableCents,
- c.attempts_used AS attemptsUsed, 4 - c.attempts_used AS attemptsRemaining,
+ c.attempts_used AS attemptsUsed, c.attempt_limit AS attemptLimit,
+ c.attempt_limit - c.attempts_used AS attemptsRemaining,
  c.generation, c.owner_id AS ownerId, c.workflow_id AS workflowId, c.owner_active AS ownerActive,
  c.has_conflict AS hasConflict, (c.has_conflict = 1 OR b.reserved_cents > 0 OR c.status IN ('needs_review', 'action_required', 'past_due')) AS needsAttention,
  m.version AS methodVersion, c.updated_at AS updatedAt
@@ -201,7 +204,7 @@ export async function debugResetPayment(
       .prepare(`UPDATE payment_collections SET
       status = CASE WHEN (SELECT total_cents - credited_cents FROM payment_balances WHERE invoice_id = ?1) <= 0
         THEN 'settled' ELSE 'open' END,
-      attempts_used = 0, generation = generation + 1, owner_id = NULL, owner_active = 0,
+      attempts_used = 0, attempt_limit = 4, generation = generation + 1, owner_id = NULL, owner_active = 0,
       workflow_id = NULL, has_conflict = 0, updated_at = ?2
       WHERE invoice_id = ?1`)
       .bind(invoiceId, at),
@@ -324,6 +327,61 @@ export async function releaseCollection(
   }
 }
 
+/**
+ * Admin manual retry once the automatic attempts are used: allows exactly one
+ * more attempt, which skips the dunning wait. A hard decline still needs a
+ * newer card. Nothing is charged here; the caller starts collection.
+ * Repeating the call before that attempt is made grants nothing more.
+ */
+export async function grantManualRetry(
+  db: D1Database,
+  invoiceId: string,
+  now = new Date()
+): Promise<PaymentDetail> {
+  const at = now.toISOString();
+  await db.batch([
+    db
+      .prepare(`UPDATE payment_collections SET attempt_limit = attempts_used + 1, updated_at = ?2
+      WHERE invoice_id = ?1 AND owner_active = 0 AND has_conflict = 0 AND attempts_used >= attempt_limit
+      AND EXISTS (SELECT 1 FROM payment_balances b WHERE b.invoice_id = ?1 AND b.reserved_cents = 0
+        AND b.total_cents - b.credited_cents - b.paid_cents > 0)
+      AND EXISTS (SELECT 1 FROM payment_attempts a WHERE a.invoice_id = ?1
+        AND a.attempt_number = payment_collections.attempts_used AND a.state = 'declined')
+      AND NOT EXISTS (SELECT 1 FROM payment_attempts a JOIN payment_balances b ON b.invoice_id = a.invoice_id
+        JOIN payment_methods m ON m.customer_id = b.customer_id
+        WHERE a.invoice_id = ?1 AND a.decline_type = 'hard' AND a.method_version >= m.version)`)
+      .bind(text(invoiceId, "invoiceId"), at),
+    db
+      .prepare(`INSERT INTO payment_timeline (id, invoice_id, generation, attempt_number, kind, message, created_at)
+      SELECT 'manual_retry:' || invoice_id || ':' || attempts_used, invoice_id, generation, attempts_used,
+        'manual_retry', 'Admin retry: one manual attempt (attempt ' || (attempts_used + 1) || ') allowed', ?2
+      FROM payment_collections WHERE invoice_id = ?1 AND attempts_used > 0
+        AND attempt_limit = attempts_used + 1 AND attempt_limit > 4
+      ON CONFLICT DO NOTHING`)
+      .bind(invoiceId, at)
+  ]);
+  const c = await getPaymentCollection(db, invoiceId);
+  if (c.attemptsRemaining > 0) return c;
+  throw new BillingError(
+    "conflict",
+    c.balanceCents <= 0
+      ? "nothing is due"
+      : c.hasConflict
+        ? "conflicting processor results; reconcile first"
+        : c.reservedCents > 0
+          ? "a charge is still unresolved"
+          : c.ownerActive
+            ? "collection is already running"
+            : c.attempts.some(
+                  (a) =>
+                    a.declineType === "hard" &&
+                    a.methodVersion >= c.methodVersion
+                )
+              ? "a hard decline needs a newer card; update the card first"
+              : "the last attempt is not declined"
+  );
+}
+
 export type PreparationGate = Pick<
   PaymentAttempt,
   "id" | "state" | "declineType"
@@ -337,7 +395,8 @@ export type PreparePaymentResult =
 
 /** Only this operation allocates a new key. The caller supplies the previous attempt/state
  * whose dunning/card gate it evaluated. Default null permits only the initial attempt,
- * never an implicit manual retry. Soft retries also require an elapsed durable notice.
+ * never an implicit manual retry. Soft retries also require an elapsed durable notice,
+ * or an admin's manual retry of that attempt (see grantManualRetry).
  * Mutations and the returned decision snapshot share one D1 batch/transaction.
  */
 export async function preparePaymentAttempt(
@@ -356,7 +415,7 @@ export async function preparePaymentAttempt(
       FROM payment_collections c JOIN payment_balances b ON b.invoice_id = c.invoice_id
       JOIN payment_methods m ON m.customer_id = b.customer_id
       WHERE c.invoice_id = ?1 AND c.generation = ?2 AND c.owner_id = ?3 AND c.owner_active = 1
-      AND c.has_conflict = 0 AND c.attempts_used < 4 AND b.reserved_cents = 0
+      AND c.has_conflict = 0 AND c.attempts_used < c.attempt_limit AND b.reserved_cents = 0
       AND ((c.attempts_used = 0 AND ?5 IS NULL) OR EXISTS (
         SELECT 1 FROM payment_attempts previous WHERE previous.invoice_id = c.invoice_id
         AND previous.attempt_number = c.attempts_used AND previous.id = ?5
@@ -365,8 +424,8 @@ export async function preparePaymentAttempt(
         WHERE previous.invoice_id = c.invoice_id AND previous.attempt_number = c.attempts_used
         AND previous.decline_type = 'soft' AND NOT EXISTS (
           SELECT 1 FROM payment_timeline notice WHERE notice.invoice_id = c.invoice_id
-          AND notice.attempt_number = previous.attempt_number AND notice.kind = 'retry_scheduled'
-          AND notice.deadline_at IS NOT NULL AND notice.deadline_at <= ?4))
+          AND notice.attempt_number = previous.attempt_number AND ((notice.kind = 'retry_scheduled'
+          AND notice.deadline_at IS NOT NULL AND notice.deadline_at <= ?4) OR notice.kind = 'manual_retry')))
       AND b.total_cents - b.credited_cents - b.paid_cents > 0
       AND NOT EXISTS (SELECT 1 FROM payment_attempts WHERE invoice_id = c.invoice_id AND state <> 'declined')
       AND NOT EXISTS (SELECT 1 FROM payment_attempts WHERE invoice_id = c.invoice_id
@@ -606,6 +665,8 @@ function canonicalOutcome(outcome: PaymentOutcome): string {
 /** Shared by HTTP results, status lookup and webhook drain; deliberately NOT generation-fenced.
  * Identity is SQL-guarded. A fresh token gates every effect in the same atomic batch.
  * Conflicting terminal observations quarantine collection without reversing the first posting/release.
+ * The one accepted change is a late success after a decline, for the invoice's latest attempt
+ * while the amount due still covers it; that posts the payment once (migration 0006).
  */
 export async function applyPaymentOutcome(
   db: D1Database,
@@ -633,6 +694,11 @@ export async function applyPaymentOutcome(
     eventId,
     payload
   ];
+  const late = `(state = 'declined' AND ?10 = 'succeeded' AND conflicted = 0
+    AND EXISTS (SELECT 1 FROM payment_collections WHERE invoice_id = ?2
+      AND attempts_used = attempt_number AND has_conflict = 0)
+    AND (SELECT total_cents - credited_cents - paid_cents - reserved_cents
+      FROM payment_balances WHERE invoice_id = ?2) >= amount_cents)`;
   const contradictory = `(state IN ('succeeded', 'declined') AND ?10 <> 'pending'
     AND (state <> ?10 OR (state = 'declined' AND decline_type IS NOT ?11)))`;
   const selected = `SELECT * FROM payment_attempts WHERE id = ?1 AND outcome_token = ?2`;
@@ -644,10 +710,11 @@ export async function applyPaymentOutcome(
       .bind(...identityValues),
     db
       .prepare(`UPDATE payment_attempts SET
-      conflicted = CASE WHEN ${contradictory} THEN 1 ELSE conflicted END,
+      conflicted = CASE WHEN ${late} THEN conflicted WHEN ${contradictory} THEN 1 ELSE conflicted END,
       processor_payment_id = ?7, outcome_token = ?12,
-      decline_type = CASE WHEN state IN ('succeeded', 'declined') THEN decline_type ELSE ?11 END,
-      state = CASE WHEN state IN ('succeeded', 'declined') THEN state
+      decline_type = CASE WHEN ${late} THEN NULL
+        WHEN state IN ('succeeded', 'declined') THEN decline_type ELSE ?11 END,
+      state = CASE WHEN ${late} THEN 'succeeded' WHEN state IN ('succeeded', 'declined') THEN state
         WHEN ?10 = 'pending' AND state IN ('recovering', 'needs_review') THEN state ELSE ?10 END,
       updated_at = ?13 WHERE ${identity}`)
       .bind(...identityValues, outcome.status, decline, token, now),
@@ -656,7 +723,7 @@ export async function applyPaymentOutcome(
       SELECT a.processor_payment_id, a.id, a.invoice_id, i.customer_id, a.amount_cents, a.currency, ?3
       FROM (${selected}) a JOIN invoices i ON i.id = a.invoice_id
       JOIN payment_reservations r ON r.attempt_id = a.id
-      WHERE a.state = 'succeeded' AND a.conflicted = 0 AND r.status = 'reserved'
+      WHERE a.state = 'succeeded' AND a.conflicted = 0 AND r.status IN ('reserved', 'released')
       ON CONFLICT (processor_payment_id) DO NOTHING`)
       .bind(outcome.attemptId, token, now),
     ...(["cash", "accounts_receivable"] as const).map((account) =>
@@ -672,7 +739,8 @@ export async function applyPaymentOutcome(
     db
       .prepare(`UPDATE payment_reservations SET status = CASE
         WHEN EXISTS (SELECT 1 FROM payments WHERE attempt_id = ?1) THEN 'converted' ELSE 'released' END, resolved_at = ?3
-      WHERE attempt_id = ?1 AND status = 'reserved' AND EXISTS (${selected}
+      WHERE attempt_id = ?1 AND (status = 'reserved' OR (status = 'released'
+        AND EXISTS (SELECT 1 FROM payments WHERE attempt_id = ?1))) AND EXISTS (${selected}
         AND conflicted = 0 AND (state = 'declined' OR (state = 'succeeded' AND EXISTS (SELECT 1 FROM payments WHERE attempt_id = ?1))))`)
       .bind(outcome.attemptId, token, now),
     db
@@ -686,7 +754,7 @@ export async function applyPaymentOutcome(
         WHEN attempts_used = (SELECT attempt_number FROM payment_attempts WHERE id = ?1)
           AND status IN ('processing', 'recovering', 'needs_review')
           AND EXISTS (${selected} AND state = 'declined')
-          THEN CASE WHEN attempts_used = 4 THEN 'past_due'
+          THEN CASE WHEN attempts_used >= attempt_limit THEN 'past_due'
             WHEN (SELECT decline_type FROM payment_attempts WHERE id = ?1) = 'hard' THEN 'action_required' ELSE 'retrying' END
         ELSE status END, updated_at = ?3
       WHERE invoice_id = (SELECT invoice_id FROM payment_attempts WHERE id = ?1 AND outcome_token = ?2)`)
@@ -719,10 +787,12 @@ export async function applyPaymentOutcome(
   return {
     status: attempt.conflicted
       ? "conflict"
-      : prior.state === outcome.status ||
-          ["succeeded", "declined"].includes(prior.state)
-        ? "duplicate"
-        : "applied",
+      : prior.state === "declined" && attempt.state === "succeeded"
+        ? "applied"
+        : prior.state === outcome.status ||
+            ["succeeded", "declined"].includes(prior.state)
+          ? "duplicate"
+          : "applied",
     collection: c
   };
 }

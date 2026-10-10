@@ -5,8 +5,10 @@ import {
   applyPaymentOutcome,
   applyPaymentWebhook,
   claimCollection,
+  debugResetPayment,
   finalizeCollection,
   getPaymentCollection,
+  grantManualRetry,
   listPaymentCollections,
   listPaymentInbox,
   listUnresolvedPaymentAttempts,
@@ -97,6 +99,9 @@ test("0003 preserves existing ledger IDs, credits, immutable triggers and indexe
       .results,
     before
   );
+  // The payment code reads the current schema
+  await applyMigration(db, "migrations/0004_payment_debug_reset.sql");
+  await applyMigration(db, "migrations/0005_manual_retry.sql");
   assert.equal((await getPaymentCollection(db, id)).status, "settled");
   assert.equal((await getPaymentCollection(db, id)).methodVersion, 1);
   assert.deepEqual(await reconcile(db), []);
@@ -112,6 +117,206 @@ test("0003 preserves existing ledger IDs, credits, immutable triggers and indexe
     .results;
   assert.ok(indexes.some((i) => i.name === "ledger_entries_by_customer"));
   assert.ok(indexes.some((i) => i.unique === 1));
+});
+
+test("0005 keeps every payment row and reference while lifting the four-attempt cap", async (t) => {
+  const db = await database(t, { through: "0004_payment_debug_reset.sql" });
+  // The payment code reads the new column, so write the old rows directly
+  const at = NOW.toISOString();
+  const run = (sql, ...values) =>
+    db
+      .prepare(sql)
+      .bind(...values)
+      .run();
+  const attempt = (invoiceId, n) =>
+    run(
+      `INSERT INTO payment_attempts (id, invoice_id, attempt_number, generation, amount_cents,
+      currency, method_version, idempotency_key, created_at, updated_at)
+      VALUES (?1, ?2, ?3, 0, 1176, 'USD', 1, ?1, ?4, ?4)`,
+      `${invoiceId}:attempt:${n}`,
+      invoiceId,
+      n,
+      at
+    );
+  const { id } = await invoice(db, "cus_acme", "2026-09");
+  await attempt(id, 1);
+  await run(
+    "UPDATE payment_attempts SET state = 'declined', decline_type = 'soft', processor_payment_id = 'pay_1' WHERE id = ?",
+    `${id}:attempt:1`
+  );
+  await run(
+    "UPDATE payment_reservations SET status = 'released', resolved_at = ?2 WHERE attempt_id = ?1",
+    `${id}:attempt:1`,
+    at
+  );
+  await attempt(id, 2);
+  await run(
+    "UPDATE payment_attempts SET state = 'succeeded', processor_payment_id = 'pay_2' WHERE id = ?",
+    `${id}:attempt:2`
+  );
+  await run(
+    "INSERT INTO payments VALUES ('pay_2', ?1 || ':attempt:2', ?1, 'cus_acme', 1176, 'USD', ?2)",
+    id,
+    at
+  );
+  await run(
+    `INSERT INTO ledger_entries (transaction_id, account, customer_id, amount_cents, description, created_at)
+    VALUES ('payment:pay_2', 'cash', 'cus_acme', 1176, 'Payment', ?1),
+           ('payment:pay_2', 'accounts_receivable', 'cus_acme', -1176, 'Payment', ?1)`,
+    at
+  );
+  await run(
+    "UPDATE payment_reservations SET status = 'converted', resolved_at = ?2 WHERE attempt_id = ?1",
+    `${id}:attempt:2`,
+    at
+  );
+  await run(
+    "UPDATE payment_collections SET status = 'paid' WHERE invoice_id = ?",
+    id
+  );
+  const held = await invoice(db, "cus_nimbus", "2026-09");
+  await attempt(held.id, 1);
+  const tables = [
+    "payment_collections",
+    "payment_attempts",
+    "payment_reservations",
+    "payments",
+    "payment_timeline",
+    "ledger_entries"
+  ];
+  const rows = async () =>
+    Object.fromEntries(
+      await Promise.all(
+        tables.map(async (table) => [
+          table,
+          (
+            await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()
+          ).results.map(({ attempt_limit, ...row }) => row)
+        ])
+      )
+    );
+  const before = await rows();
+  await applyMigration(db, "migrations/0005_manual_retry.sql");
+  assert.deepEqual(await rows(), before);
+  assert.deepEqual(
+    (await db.prepare("PRAGMA foreign_key_check").all()).results,
+    []
+  );
+  assert.deepEqual(await reconcile(db), []);
+  const paid = await getPaymentCollection(db, id);
+  assert.deepEqual(
+    [paid.status, paid.attemptLimit, paid.attemptsRemaining],
+    ["paid", 4, 2]
+  );
+  assert.equal((await getPaymentCollection(db, held.id)).reservedCents, 1176);
+  // Recreated triggers and indexes still guard the rebuilt tables
+  await assert.rejects(
+    db.prepare("UPDATE payment_attempts SET amount_cents = 1").run(),
+    /immutable/
+  );
+  await assert.rejects(
+    db.prepare("DELETE FROM payment_attempts").run(),
+    /immutable/
+  );
+  const indexes = (
+    await db.prepare("PRAGMA index_list(payment_attempts)").all()
+  ).results.map((i) => i.name);
+  assert.ok(indexes.includes("payment_one_unresolved_attempt"));
+  const other = await invoice(db, "cus_orbit", "2026-09");
+  const b = await prepare(db, await claimCollection(db, other.id, 0, NOW));
+  const opened = await getPaymentCollection(db, other.id);
+  assert.deepEqual(
+    [opened.status, opened.reservedCents, opened.timeline.length],
+    ["processing", b.amountCents, 4]
+  );
+});
+
+test("manual retry adds one attempt after the automatic four, skips dunning, and needs a newer card after a hard decline", async (t) => {
+  const { db, id, owner: first } = await setup(t);
+  let owner = first;
+  for (let n = 1; n <= 4; n++)
+    await applyPaymentOutcome(
+      db,
+      outcome(await prepare(db, owner), "declined", { declineType: "soft" }),
+      { now: NOW }
+    );
+  assert.equal((await getPaymentCollection(db, id)).status, "past_due");
+  assert.equal(
+    (await preparePaymentAttempt(db, owner, NOW)).kind,
+    "budget_exhausted"
+  );
+  await assert.rejects(grantManualRetry(db, id, NOW), (e) =>
+    /already running/.test(e.message)
+  );
+  await releaseCollection(db, owner, NOW);
+  const granted = await grantManualRetry(db, id, NOW);
+  assert.deepEqual(
+    [granted.attemptLimit, granted.attemptsRemaining, granted.status],
+    [5, 1, "past_due"]
+  );
+  assert.equal(
+    (await grantManualRetry(db, id, NOW)).attemptLimit,
+    5,
+    "a repeat before the attempt is made grants nothing more"
+  );
+  assert.deepEqual(
+    granted.timeline
+      .filter((e) => e.kind === "manual_retry")
+      .map((e) => e.attemptNumber),
+    [4]
+  );
+  await assert.rejects(
+    db
+      .prepare(
+        "UPDATE payment_collections SET attempt_limit = 7 WHERE invoice_id = ?"
+      )
+      .bind(id)
+      .run(),
+    /exactly one attempt/
+  );
+
+  // The manual attempt needs no elapsed dunning notice for attempt 4
+  owner = await claimCollection(db, id, owner.generation, NOW);
+  const fourth = granted.attempts.at(-1);
+  const manual = await preparePaymentAttempt(db, owner, NOW, fourth);
+  assert.equal(manual.kind, "attempt");
+  assert.equal(manual.attempt.attemptNumber, 5);
+  await applyPaymentOutcome(
+    db,
+    outcome(manual.attempt, "declined", { declineType: "hard" }),
+    { now: NOW }
+  );
+  assert.equal((await getPaymentCollection(db, id)).status, "past_due");
+  await releaseCollection(db, owner, NOW);
+  await assert.rejects(grantManualRetry(db, id, NOW), (e) =>
+    /newer card/.test(e.message)
+  );
+  await updatePaymentMethod(db, "cus_acme", 1);
+  assert.equal((await grantManualRetry(db, id, NOW)).attemptLimit, 6);
+  owner = await claimCollection(db, id, owner.generation, NOW);
+  const last = await preparePaymentAttempt(
+    db,
+    owner,
+    NOW,
+    (await getPaymentCollection(db, id)).attempts.at(-1)
+  );
+  assert.deepEqual(
+    [last.attempt.attemptNumber, last.attempt.methodVersion],
+    [6, 2]
+  );
+  await applyPaymentOutcome(db, outcome(last.attempt), { now: NOW });
+  const paid = await getPaymentCollection(db, id);
+  assert.deepEqual(
+    [paid.status, paid.attemptsUsed, paid.attemptLimit],
+    ["paid", 6, 6]
+  );
+  await releaseCollection(db, owner, NOW);
+  await assert.rejects(grantManualRetry(db, id, NOW), (e) =>
+    /nothing is due/.test(e.message)
+  );
+  assert.deepEqual(await reconcile(db), []);
+  const reset = await debugResetPayment(db, id, NOW);
+  assert.deepEqual([reset.attemptsUsed, reset.attemptLimit], [0, 4]);
 });
 
 test("reservation survives uncertainty/review; late webhook succeeds once across different event IDs", async (t) => {
@@ -461,6 +666,87 @@ test("mismatched/foreign processor results and inbox payload reuse cannot mutate
   assert.equal((await getPaymentCollection(db, id)).paidCents, 1176);
   assert.equal((await getPaymentCollection(db, other)).paidCents, 0);
   assert.deepEqual(await reconcile(db), []);
+});
+
+test("a decline can become a late success for the latest attempt only while the amount due covers it", async (t) => {
+  const { db, id, owner } = await setup(t);
+  const a = await prepare(db, owner);
+  const soft = outcome(a, "declined", { declineType: "soft" });
+  await applyPaymentOutcome(db, soft, { now: NOW });
+  assert.equal((await getPaymentCollection(db, id)).status, "retrying");
+  await receivePaymentWebhook(db, "late", outcome(a), NOW);
+  assert.equal((await applyPaymentWebhook(db, "late", NOW)).status, "applied");
+  let c = await getPaymentCollection(db, id);
+  assert.deepEqual(
+    [c.status, c.paidCents, c.reservedCents, c.hasConflict],
+    ["paid", 1176, 0, 0]
+  );
+  assert.deepEqual(
+    [c.attempts[0].state, c.attempts[0].declineType],
+    ["succeeded", null]
+  );
+  assert.equal(
+    (await applyPaymentOutcome(db, outcome(a), { now: NOW })).status,
+    "duplicate"
+  );
+  // Paid stays paid: a decline after it is a conflict, money untouched
+  assert.equal(
+    (await applyPaymentOutcome(db, soft, { now: NOW })).status,
+    "conflict"
+  );
+  c = await getPaymentCollection(db, id);
+  assert.deepEqual([c.paidCents, c.attempts[0].state], [1176, "succeeded"]);
+  assert.deepEqual(
+    (await reconcile(db)).map((i) => i.check),
+    ["payment_outcome_conflict"]
+  );
+
+  // A credit since the decline: the full charge would overcollect
+  const { id: credited } = await invoice(db, "cus_orbit", "2026-09");
+  const b = await prepare(db, await claimCollection(db, credited, 0, NOW));
+  await applyPaymentOutcome(
+    db,
+    outcome(b, "declined", { declineType: "hard" }),
+    { now: NOW }
+  );
+  await issueCredit(db, credit(credited, 100, "after-decline"), NOW);
+  assert.equal(
+    (await applyPaymentOutcome(db, outcome(b), { now: NOW })).status,
+    "conflict"
+  );
+  c = await getPaymentCollection(db, credited);
+  assert.deepEqual(
+    [c.paidCents, c.hasConflict, c.attempts[0].state],
+    [0, 1, "declined"]
+  );
+
+  // The triggers hold even without the guarded update
+  const { id: direct } = await invoice(db, "cus_nimbus", "2026-09");
+  const d = await prepare(db, await claimCollection(db, direct, 0, NOW));
+  await applyPaymentOutcome(
+    db,
+    outcome(d, "declined", { declineType: "soft" }),
+    { now: NOW }
+  );
+  await issueCredit(db, credit(direct, 1, "direct"), NOW);
+  await assert.rejects(
+    db
+      .prepare(
+        "UPDATE payment_attempts SET state = 'succeeded', decline_type = NULL WHERE id = ?"
+      )
+      .bind(d.id)
+      .run(),
+    /immutable/
+  );
+  await assert.rejects(
+    db
+      .prepare(
+        "UPDATE payment_reservations SET status = 'converted' WHERE attempt_id = ?"
+      )
+      .bind(d.id)
+      .run(),
+    /immutable/
+  );
 });
 
 test("terminal observations are monotonic; contradictions quarantine without undoing prior money", async (t) => {

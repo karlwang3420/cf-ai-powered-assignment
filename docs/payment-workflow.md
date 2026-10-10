@@ -52,6 +52,15 @@ used for that attempt; duplicate notifications do not authorize another charge
 or extend the wait deadline. Soft-decline retries use the next unused day-1/3/7
 slot after the initial attempt; elapsed slots do not cause a burst of retries.
 
+**Manual retry:** four is the automatic budget, not a lifetime cap. Once it is
+used, with nothing in flight, no conflict and a balance due, an admin
+**Retry payment** raises the invoice's `attempt_limit` by exactly one
+(`grantManualRetry`, migration `0005`) and starts a run. That attempt charges
+at once: a durable `manual_retry` timeline entry stands in for the dunning
+slot. A hard decline still needs a newer card first. A declined manual attempt
+leaves the invoice past due again; a trigger rejects any other change to the
+limit, so repeated clicks cannot add more than one pending attempt.
+
 **Atomic preparation:** permit only one active collection owner per invoice.
 In one guarded D1 transaction/batch, check the remaining balance and shared
 budget, reject a new attempt if any unresolved attempt exists, and persist the
@@ -94,10 +103,18 @@ flowchart TD
 
 Before waiting and after waking, check the durable attempt state in D1: an event
 notification is a hint, not the financial source of truth. Unrelated or stale
-events do not reset the deadline or recovery-check budget. The processor's
-terminal outcomes are immutable; stale pending observations cannot regress a
-resolved attempt. Contradictory terminal results block new charges and require
-reconciliation rather than blindly releasing a reservation.
+events do not reset the deadline or recovery-check budget. Stale pending
+observations cannot regress a resolved attempt. Contradictory terminal results
+block new charges and require reconciliation rather than blindly releasing a
+reservation.
+
+**Late success after a decline** is the one accepted terminal change. If the
+processor later reports a declined charge as succeeded (same payment ID), the
+merchant posts it once and converts the released reservation, but only for the
+invoice's latest attempt, with no conflict recorded and the amount due still
+covering the charge (migration `0006`). Otherwise it is a conflict as before:
+a newer attempt may already be charging, or a credit since the decline would
+make the payment overcollect. A success never becomes a decline.
 
 **Example:** the processor charges $20 but the response is lost. Same-key replay
 returns the original charge, or status lookup confirms it, and reconciliation
@@ -235,7 +252,8 @@ stateDiagram-v2
 
 Entering `retrying` or `action_required` never grants a new-attempt budget.
 If no attempts remain, immediately use guarded finalization rather than waiting
-or charging again.
+or charging again. Only an admin's manual retry adds an attempt, from
+`past_due`.
 
 ## Invariants and implementation checks
 
@@ -247,8 +265,9 @@ or charging again.
   reservation conversion, ledger entries and financial state.
 - **Balanced ledger:** payment debits cash and credits accounts receivable.
   Reconciliation compares internal payments with processor records.
-- **Bounded collection:** four new attempts across soft declines, hard declines,
-  restarts and manual recovery. Duplicate events never reset budgets/deadlines.
+- **Bounded collection:** four automatic attempts across soft declines, hard
+  declines, restarts and resume; each admin manual retry adds exactly one.
+  Duplicate events never reset budgets/deadlines.
 - **Late results remain actionable:** financial application is independent of
   Workflow lifetime; durable unapplied events have an explicit local retry owner.
 
@@ -292,13 +311,15 @@ The tests verify:
   upgrades without reseeding existing customers/data.
 - **Processor:** `processor/` owns separate SQLite idempotency/outbox state,
   nine scenario controls, indefinite key retention, durable alarms and signed
-  callback delivery. Terminal outcomes cannot be force-edited. The lost-response
+  callback delivery. The lost-response
   scenario returns a deterministic 504 after committing success; it is not a
   physical socket-disconnect test. Unresolved pending stays pending until the
-  mock processor is told to decide it (**Mock controls → Settle pending
-  charge**, `POST /demo/settle`). That changes only processor state: the
-  merchant learns the outcome through the normal signed webhook or an
-  original-key lookup, and terminal outcomes still cannot be changed.
+  mock processor is told to decide it. Every charge change follows the
+  processor's own [state model](../processor/README.md#state-model)
+  (`processor/model.ts`): scenario plans create charges, one transition table
+  changes them, and `/demo/inspect` reports each charge's and delivery's
+  allowed demo actions. These change only processor state: the merchant learns
+  the outcome through the normal signed webhook or an original-key lookup.
 - **Runtime:** `src/payment-workflow.ts`, `src/payments/collection.ts` and
   `service.ts` run Workflow checkpoints, sleeps and events. Charge retries
   use two retries after the first call; original-key automatic recovery has
@@ -315,20 +336,20 @@ The tests verify:
   retention. Pending signed callbacks exercise the reverse service binding;
   missing callbacks fall back to original-key reconciliation.
 - **Recovery surface:** `src/payments/api.ts`, billing-panel payment controls
-  and `scripts/billing.mjs` expose read state/timeline, collect, processor
-  inspection and explicit reconciliation. Resume is opt-in; no background queue
+  and `scripts/billing.mjs` expose read state/timeline, collect, manual retry,
+  processor inspection and explicit reconciliation. Resume is opt-in; no background queue
   is assumed. A pending observation can apply successfully but its reconciliation
   **check remains unresolved**, not a successful payment. Confirmed decline also
   does not mean paid. The assistant only reads payment state; existing credits
   still require approval and all arithmetic remains deterministic code.
 - **Real two-Worker integration:** `tests/payment-integration.test.mjs` uses the
   actual Vite config with remote bindings disabled and fresh OS-temp persistence.
-  It exercises success, soft/hard decline recovery, four-attempt exhaustion and
-  resume, lost response, missing/duplicate webhook, pending, needs-review/late
-  signed success and full-credit card timeout. It asserts unique payments,
-  balanced ledger, retained unknown reservation and unchanged attempt budget.
-  The runtime companion test covers outage backoff and automatic
-  InvoiceWorkflow collection. Tests never touch the normal `.wrangler` state.
+  It exercises success, soft/hard decline recovery, four-attempt exhaustion,
+  bounded resume and a manual retry, lost response with a resent webhook,
+  duplicate webhook, pending, needs-review/late signed success and full-credit
+  card timeout. It asserts unique payments, balanced ledger, retained unknown
+  reservation and unchanged attempt budget. The runtime companion test covers
+  outage backoff and that InvoiceWorkflow finalizes without collecting. Tests never touch the normal `.wrangler` state.
 - **Integration fixtures:** the late case uses the never-resolving pending
   preset and settles it only after the test observes needs-review and the
   ended original run; normal signing/delivery then posts the late success.
@@ -358,12 +379,12 @@ exception is the admin dialog's local **Debug → Reset to unpaid**
 (`POST /api/payments/:invoiceId/debug-reset`, migration `0004`). It stops the
 old run, clears that invoice's processor keys/outbox/queue first, then in one D1
 batch deletes its payments, cash/receivable postings, reservations, attempts,
-webhooks and timeline. The invoice reopens with four attempts and a new
+webhooks and timeline. The invoice reopens with four automatic attempts and a new
 generation; credits remain. No-delete triggers allow this only while that
 invoice is unlocked inside the batch. A webhook already in flight at the reset
 moment is not fenced; wait for active runs to settle before resetting.
 
-UI invoice runs start collection automatically; direct-D1 CLI invoice
-finalization leaves collection to the explicit local API command/control so a
-scenario can be chosen first. Stop dev for migrations/legacy direct-file CLI
+Neither UI invoice runs nor direct-D1 CLI finalization start collection; the
+explicit **Collect** control or `collect` command does, so a scenario can be
+chosen first. Stop dev for migrations/legacy direct-file CLI
 writes on Windows; new payment CLI commands use the running API.

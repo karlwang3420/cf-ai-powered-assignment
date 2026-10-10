@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { getAgentByName } from "agents";
-import { resetDemo } from "./reset";
+import { destroyAndVerifyChat, resetDemo } from "./reset";
 import {
   admitSession,
   emptyDemoState,
@@ -8,12 +8,12 @@ import {
   type DemoState,
   type DemoStatus
 } from "./session";
-import { DEMO_SQL } from "./sql";
+import { DEMO_MIGRATIONS, DEMO_SQL } from "./sql";
 
 const RESET_PENDING = "resetPending";
 
 /**
- * One instance coordinates the hosted demo. Decisions use synchronous storage
+ * One instance coordinates the hosted demo; local dev uses it only to reset. Decisions use synchronous storage
  * and start a reset before anything else can run, and every request admitted
  * during a reset waits for it, so concurrent first requests reseed once and
  * never read half-reset data. Waiting on a promise rather than
@@ -67,11 +67,32 @@ export class DemoSession extends DurableObject<Env> {
       // A reset that stops partway (say, processor cleared but D1 not rebuilt)
       // leaves the stores inconsistent, so every request retries it until done.
       this.ctx.storage.kv.put(RESET_PENDING, true);
-      await resetDemo(this.env, DEMO_SQL, async (customerId) => {
-        await (
-          await getAgentByName(this.env.BillingAssistant, customerId)
-        ).destroy();
-      });
+      await resetDemo(
+        this.env,
+        DEMO_SQL,
+        async (customerId) => {
+          await destroyAndVerifyChat(
+            async () => {
+              await (
+                await getAgentByName(this.env.BillingAssistant, customerId)
+              ).destroy();
+            },
+            async () => {
+              const agent = await getAgentByName(
+                this.env.BillingAssistant,
+                customerId
+              );
+              const response = await agent.fetch(
+                new Request("https://chat.internal/get-messages")
+              );
+              if (!response.ok)
+                throw new Error("could not verify chat teardown");
+              return response.json();
+            }
+          );
+        },
+        DEMO_MIGRATIONS.map(([name]) => name)
+      );
       this.ctx.storage.kv.put("state", next());
       this.ctx.storage.kv.delete(RESET_PENDING);
     })();

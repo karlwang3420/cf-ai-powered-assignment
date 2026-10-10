@@ -13,15 +13,22 @@ import {
   api,
   monthLabel,
   type PaymentReconciliation,
-  type PaymentRun
+  type PaymentRun,
+  type ProcessorInspection
 } from "../client-api";
-import type { ProcessorScenario } from "../payments/protocol";
+import type {
+  ChargeState,
+  ProcessorCharge,
+  ProcessorScenario
+} from "../payments/protocol";
 import { PaymentBadge } from "./payment-panel";
 import {
   canCollectPayment,
+  canRetryPayment,
   collectBlockedReason,
   dueCents,
   invoiceMonth,
+  needsNewerCard,
   paymentLabel,
   paymentNextStep,
   paymentPollDelay,
@@ -54,6 +61,12 @@ const scenarios: { label: string; values: ProcessorScenario[] }[] = [
   }
 ];
 
+/** "pending", "succeeded" or "soft decline", as the processor reports it. */
+const chargeOutcome = (charge: ProcessorCharge) =>
+  charge.status === "declined"
+    ? `${charge.declineType} decline`
+    : charge.status;
+
 const queueLabel = (queue: ProcessorScenario[]) =>
   queue.length ? queue.map(paymentLabel).join(" → ") : "default success";
 
@@ -70,15 +83,21 @@ const queueIndex = (queue: ProcessorScenario[] | null) =>
 const time = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-US", { hour12: false });
 
+/** "2 of 4 used", or "5 of 5 used · 1 manual" after manual retries. */
+export const attemptsLabel = (payment: PaymentCollection) =>
+  `${payment.attemptsUsed} of ${payment.attemptLimit} used${
+    payment.attemptLimit > 4 ? ` · ${payment.attemptLimit - 4} manual` : ""
+  }`;
+
 export function AttemptDots({ payment }: { payment: PaymentCollection }) {
   const used = payment.attemptsUsed;
   return (
     <span
       className="inline-flex gap-1"
-      title={`${used} of 4 attempts used`}
-      aria-label={`${used} of 4 attempts used`}
+      title={`Attempts: ${attemptsLabel(payment)}`}
+      aria-label={`Attempts: ${attemptsLabel(payment)}`}
     >
-      {[0, 1, 2, 3].map((i) => (
+      {Array.from({ length: payment.attemptLimit }, (_, i) => (
         <span
           key={i}
           className={`size-2 rounded-full ${
@@ -302,6 +321,81 @@ function DebugTab({
   );
 }
 
+const actionLabel: Record<ChargeState, string> = {
+  pending: "Pending",
+  succeeded: "Succeeds",
+  soft_decline: "Soft decline",
+  hard_decline: "Hard decline"
+};
+
+/** Existing outcome controls, using the latest charge's allowed transitions. */
+function MockPaymentControl({
+  processor,
+  detail,
+  invoiceId,
+  disabled,
+  onAction
+}: {
+  processor: ProcessorInspection | null;
+  detail: PaymentDetail | null;
+  invoiceId: string;
+  disabled: boolean;
+  onAction: (label: string, action: () => Promise<string>) => void;
+}) {
+  const current = processor?.requests[0];
+  const attempt = detail?.attempts.find(
+    (a) => a.id === current?.request.attemptId
+  );
+  const outcomes =
+    current?.actions.filter(
+      (action): action is ChargeState => action !== "notify"
+    ) ?? [];
+  return (
+    <div className="space-y-1.5" aria-label="Mock payment">
+      <p className="text-kumo-default">
+        Mock payment state ·{" "}
+        {!processor
+          ? "Loading…"
+          : current
+            ? paymentLabel(current.state)
+            : "Not charged"}
+      </p>
+      {current && (
+        <p className="text-kumo-subtle">
+          {attempt
+            ? `Attempt ${attempt.attemptNumber}`
+            : current.request.attemptId}
+          {" · "}
+          {formatCents(current.request.amountCents)}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {current?.charge &&
+          outcomes.map((outcome) => (
+            <Button
+              key={outcome}
+              size="sm"
+              variant="secondary"
+              disabled={disabled}
+              onClick={() =>
+                onAction("Settling", async () => {
+                  const r = await api.decideCharge(
+                    invoiceId,
+                    current.charge!.processorPaymentId,
+                    outcome
+                  );
+                  return `Processor settled the charge: ${chargeOutcome(r.charge)}. Waiting for its webhook.`;
+                })
+              }
+            >
+              {actionLabel[outcome]}
+            </Button>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 function ReconciliationSummary({ result }: { result: PaymentReconciliation }) {
   const problems = [
     ...result.inbox
@@ -346,7 +440,7 @@ export function PaymentDialog({
   const [message, setMessage] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [result, setResult] = useState<PaymentReconciliation | null>(null);
-  const [queue, setQueue] = useState<ProcessorScenario[] | null>(null);
+  const [processor, setProcessor] = useState<ProcessorInspection | null>(null);
   const [reload, setReload] = useState(0);
   const alive = useRef(true);
   const acting = useRef(false);
@@ -381,17 +475,25 @@ export function PaymentDialog({
     ]
   );
 
-  // The processor's remaining queue is the source of truth; attempts consume it.
+  // The processor's queue and charges are the source of truth for the mock
+  // controls; attempts consume the queue.
   useEffect(() => {
     let stale = false;
     api
       .paymentProcessor(payment.invoiceId)
-      .then((r) => !stale && setQueue(r.scenarios))
-      .catch(() => !stale && setQueue(null));
+      .then((r) => !stale && setProcessor(r))
+      .catch(() => !stale && setProcessor(null));
     return () => {
       stale = true;
     };
-  }, [payment.invoiceId, payment.attemptsUsed, payment.status, reload]);
+  }, [
+    payment.invoiceId,
+    payment.attemptsUsed,
+    payment.status,
+    payment.updatedAt,
+    reload
+  ]);
+  const queue = processor?.scenarios ?? null;
 
   const act = async (label: string, action: () => Promise<string>) => {
     if (acting.current) return;
@@ -424,7 +526,12 @@ export function PaymentDialog({
   const disabled = Boolean(busy || readError);
   const blocked = collectBlockedReason(payment);
   const month = monthLabel(invoiceMonth(payment.invoiceId));
-
+  // Once the automatic attempts are used, Collect becomes a manual retry.
+  const manual = payment.attemptsRemaining === 0 && payment.balanceCents > 0;
+  const cardFirst = needsNewerCard(payment, detail);
+  const canAct = manual
+    ? canRetryPayment(payment) && !cardFirst
+    : canCollectPayment(payment);
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <Dialog size="lg" className="p-0">
@@ -463,7 +570,7 @@ export function PaymentDialog({
               <div className="text-right space-y-1">
                 <AttemptDots payment={payment} />
                 <p className="text-xs text-kumo-subtle tabular-nums">
-                  {payment.attemptsUsed} of 4 used
+                  {attemptsLabel(payment)}
                 </p>
               </div>
             </div>
@@ -476,18 +583,26 @@ export function PaymentDialog({
                   size="sm"
                   variant="primary"
                   icon={<PlayIcon size="0.875rem" />}
-                  disabled={disabled || !canCollectPayment(payment)}
-                  title={blocked ?? undefined}
+                  disabled={disabled || !canAct}
+                  title={
+                    manual
+                      ? "Charge once more now. Each retry allows one manual attempt."
+                      : (blocked ?? undefined)
+                  }
                   onClick={() =>
-                    void act("Collecting", async () => {
-                      const r = await api.collectPayment(payment.invoiceId);
+                    void act(manual ? "Retrying" : "Collecting", async () => {
+                      const r = manual
+                        ? await api.retryPayment(payment.invoiceId)
+                        : await api.collectPayment(payment.invoiceId);
                       return r.started
-                        ? "Collection started."
+                        ? manual
+                          ? "Manual retry started: one attempt."
+                          : "Collection started."
                         : "Existing collection recovered; no new charge.";
                     })
                   }
                 >
-                  Collect
+                  {manual ? "Retry payment" : "Collect"}
                 </Button>
                 <Button
                   size="sm"
@@ -513,7 +628,15 @@ export function PaymentDialog({
                   Mock: next outcome {queueLabel(queue)}
                 </p>
               )}
-              {blocked && payment.balanceCents > 0 && (
+              {manual && !canAct && (
+                <p className="text-xs text-kumo-subtle">
+                  Retry blocked:{" "}
+                  {cardFirst && canRetryPayment(payment)
+                    ? "a hard decline needs a newer card (Mock controls)"
+                    : collectBlockedReason(payment)}
+                </p>
+              )}
+              {!manual && blocked && payment.balanceCents > 0 && (
                 <p className="text-xs text-kumo-subtle">
                   Collect blocked: {blocked}
                 </p>
@@ -562,11 +685,7 @@ export function PaymentDialog({
                       aria-label="Mock scenario"
                       className="w-full min-w-0 px-2 py-1.5 rounded-lg border border-kumo-line bg-kumo-base text-kumo-default"
                       value={queueIndex(queue)}
-                      disabled={
-                        disabled ||
-                        queue === null ||
-                        !canCollectPayment(payment)
-                      }
+                      disabled={disabled || queue === null}
                       onChange={(e) => {
                         const values = scenarios[Number(e.target.value)].values;
                         void act("Saving scenario", async () => {
@@ -574,7 +693,10 @@ export function PaymentDialog({
                             payment.invoiceId,
                             values
                           );
-                          if (alive.current) setQueue(r.scenarios);
+                          if (alive.current)
+                            setProcessor((p) =>
+                              p ? { ...p, scenarios: r.scenarios } : p
+                            );
                           return `Mock queue set: ${queueLabel(r.scenarios)}`;
                         });
                       }}
@@ -592,53 +714,18 @@ export function PaymentDialog({
                         </option>
                       ))}
                     </select>
-                    {!canCollectPayment(payment) && (
-                      <span className="block text-kumo-subtle">
-                        {payment.reservedCents > 0
-                          ? "Locked while a charge is unresolved. Settle it below."
-                          : "Only for invoices that can still be collected."}
-                      </span>
-                    )}
                   </label>
-                  {payment.reservedCents > 0 && (
-                    <div className="space-y-1.5">
-                      <p className="text-kumo-subtle">
-                        Settle pending charge ·{" "}
-                        {formatCents(payment.reservedCents)} · processor sends
-                        its webhook
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {(
-                          [
-                            ["succeeded", "Succeeds"],
-                            ["soft_decline", "Soft decline"],
-                            ["hard_decline", "Hard decline"]
-                          ] as const
-                        ).map(([outcome, label]) => (
-                          <Button
-                            key={outcome}
-                            size="sm"
-                            variant="secondary"
-                            disabled={disabled}
-                            onClick={() =>
-                              void act("Settling", async () => {
-                                await api.settlePendingCharge(
-                                  payment.invoiceId,
-                                  outcome
-                                );
-                                return `Processor settled the charge: ${label.toLowerCase()}. Waiting for its webhook.`;
-                              })
-                            }
-                          >
-                            {label}
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  <MockPaymentControl
+                    processor={processor}
+                    detail={detail}
+                    disabled={disabled}
+                    onAction={(label, action) => void act(label, action)}
+                    invoiceId={payment.invoiceId}
+                  />
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-kumo-subtle">
                       Simulated card · version {payment.methodVersion}
+                      {cardFirst ? " · hard declined" : ""}
                     </p>
                     <Button
                       size="sm"

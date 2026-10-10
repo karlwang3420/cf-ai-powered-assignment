@@ -66,29 +66,58 @@ currency: "USD", methodVersion }`. Identifiers are nonempty, at most 200
 
 ### Endpoints (all require the bearer token)
 
-| Method/path                                              | Contract                                                                                                                                                                  |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /charges`                                          | `ChargeRequest`; 201 on first committed outcome, 200 on replay; `ChargeResponse`.                                                                                         |
-| `GET /charges/:processorPaymentId`                       | 200 `ChargeStatusResponse`.                                                                                                                                               |
-| `GET /charges?idempotencyKey=<URL-encoded-original-key>` | Same status response by original key.                                                                                                                                     |
-| `PUT /demo/scenarios`                                    | `{ invoiceId, scenarios: ProcessorScenario[] }`; replaces only the unconsumed per-invoice queue, maximum 20 entries, empty clears. Echoes input.                          |
-| `GET /demo/inspect?invoiceId=<id>`                       | Read-only `{ invoiceId, keyRetention: "indefinite", scenarios, requests, outbox }`; latest 50 requests/100 events, newest first. No progression or delivery side effects. |
-| `POST /demo/outbox/retry`                                | `{ eventId }`; only an `exhausted` delivery can be explicitly resumed. Returns `{ eventId, state: "queued" }`; same event ID/body.                                        |
+| Method/path                                              | Contract                                                                                                                                                                   |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /charges`                                          | `ChargeRequest`; 201 on first committed outcome, 200 on replay; `ChargeResponse`.                                                                                          |
+| `GET /charges/:processorPaymentId`                       | 200 `ChargeStatusResponse`.                                                                                                                                                |
+| `GET /charges?idempotencyKey=<URL-encoded-original-key>` | Same status response by original key.                                                                                                                                      |
+| `PUT /demo/scenarios`                                    | `{ invoiceId, scenarios: ProcessorScenario[] }`; replaces only the unconsumed per-invoice queue, maximum 20 entries, empty clears. Echoes input.                           |
+| `GET /demo/inspect?invoiceId=<id>`                       | Read-only `{ invoiceId, keyRetention: "indefinite", scenarios, requests, outbox }`; latest 50 requests/100 events, newest first. No progression or delivery side effects.  |
+| `POST /demo/deliver`                                     | `{ invoiceId, eventId }`; sends a `dropped` or `exhausted` event again, same event ID/body. Returns `{ invoiceId, eventId, state: "queued" }`; 409 for any other delivery. |
 
 Additional demo controls (also require the bearer token):
 
-| Method/path            | Contract                                                                                                                                                                                                                                                            |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /demo/settle`    | `{ invoiceId, outcome: "succeeded" \| "soft_decline" \| "hard_decline" }`; resolves the invoice's latest pending charge, queues its signed webhook, returns `{ invoiceId, charge }`. Returns 409 if there is no pending charge; terminal outcomes cannot be edited. |
-| `POST /demo/reset`     | `{ invoiceId }`; destructively deletes that invoice's keys/charges, outbox and scenario queue, returns `{ invoiceId, reset: true }`. Other invoices are untouched.                                                                                                  |
-| `POST /demo/reset-all` | `{}`; destructively deletes every key/charge, outbox entry and scenario queue and cancels the delivery alarm, returns `{ reset: true }`. Used by the hosted demo's full reset.                                                                                      |
+| Method/path            | Contract                                                                                                                                                                                                                                                   |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /demo/decide`    | `{ invoiceId, processorPaymentId, outcome: ChargeState }`; moves a charge along the [state model](#state-model) and queues one new signed event. Returns `{ invoiceId, eventId, charge }`; 409 `invalid_transition` for a change the model does not allow. |
+| `POST /demo/notify`    | `{ invoiceId, processorPaymentId }`; queues one new signed event (new event ID) for the charge's current state. Returns `{ invoiceId, eventId, charge }`.                                                                                                  |
+| `POST /demo/reset`     | `{ invoiceId }`; destructively deletes that invoice's keys/charges, outbox and scenario queue, returns `{ invoiceId, reset: true }`. Other invoices are untouched.                                                                                         |
+| `POST /demo/reset-all` | `{}`; destructively deletes every key/charge, outbox entry and scenario queue and cancels the delivery alarm, returns `{ reset: true }`. Used by the hosted demo's full reset.                                                                             |
 
-Inspection request entries contain `{ request, scenario, charge, resolveAt }`;
-`charge` is null for an outage before commit. Outbox entries contain `{ event,
-state, attempts, copiesRemaining, dueAt, deliveredAt, lastError }`. Numeric times
-are epoch milliseconds; event `createdAt` is ISO UTC. Settlement only resolves
-pending charges; it cannot change a terminal outcome. Reset is a separate,
-destructive exception that forgets the invoice's processor records entirely.
+Inspection is the processor's whole state for the invoice
+(`ProcessorInspection` in `src/payments/protocol.ts`). Request entries contain
+`{ request, scenario, charge, state, resolveAt, actions }`; `charge` is null and
+`state` is `uncommitted` for an outage before commit. Outbox entries contain
+`{ event, state, attempts, copiesRemaining, dueAt, deliveredAt, lastError,
+actions }`. `actions` are the demo controls the state model allows. Numeric
+times are epoch milliseconds; event `createdAt` is ISO UTC. Reset is a
+separate, destructive exception that forgets the invoice's processor records
+entirely.
+
+## State model
+
+`processor/model.ts` is the whole mock processor in three tables. The
+processor never reads merchant data; what a change means for the invoice is the
+merchant's decision.
+
+- **Scenario plans** (`SCENARIO_PLANS`): how each queued scenario creates its
+  charge. That covers its first state, whether the processor decides a pending
+  charge itself after 2 seconds, an outage before commit, a lost response, and
+  whether the charge's first webhook is dropped or sent twice.
+- **Charge transitions** (`CHARGE_TRANSITIONS`): the only changes a committed
+  charge can make, whoever makes them (the 2-second pending alarm or
+  `/demo/decide`). Each change sends one new signed webhook.
+
+  | From                            | To                                          |
+  | ------------------------------- | ------------------------------------------- |
+  | `pending`                       | `succeeded`, `soft_decline`, `hard_decline` |
+  | `soft_decline` / `hard_decline` | `succeeded` (late success, same payment ID) |
+  | `succeeded`                     | nothing                                     |
+
+- **Deliveries**: `queued` events are sent by the alarm until `delivered` or,
+  after 8 failed attempts, `exhausted`. `dropped` (lost-webhook scenario) and
+  `exhausted` events can be delivered again with `/demo/deliver`.
+  `/demo/notify` adds a new event for any committed charge.
 
 Errors are `{ error: { code, message } }`. Important statuses: 400 invalid input,
 401 unauthenticated, 404 unknown charge/endpoint, 409 `idempotency_conflict` or
@@ -100,7 +129,7 @@ identity, amount, currency or method version. Different valid payloads under a
 key get 409, including before an outage commits. Unsupported currencies/invalid
 payloads get 400 and cannot mutate the original. A given attempt ID also cannot
 be reused with a different key. Successful replay returns the current outcome
-of the original charge; pending may advance, terminal outcomes never change.
+of the original charge, which changes only along the state model.
 
 **Retention is indefinite during normal operation:** there is no automatic key
 expiration or TTL. Changing scenario queues never affects existing keys. Persist
@@ -129,7 +158,7 @@ supports card-update recovery without changing old outcomes.
 | `outage`                        | First POST durably pins payload/scenario, returns 503 before charge creation. Status is 503 until a same-key POST commits success. That replay does not consume another scenario. |
 | `lost_response`                 | Atomically commits success + outbox, returns 504 **without charge data** once. Same-key replay or status returns the one committed charge.                                        |
 | `pending`                       | Pending charge/event, then success/event after 2 seconds via durable alarm (or a due status/replay observation). Same payment ID, distinct event IDs.                             |
-| `unresolved_pending`            | Stays pending across restarts until `/demo/settle` resolves it. Settlement queues a normal signed terminal event; the merchant is never force-edited.                             |
+| `unresolved_pending`            | Stays pending across restarts until `/demo/decide` decides it. That queues a normal signed event; the merchant is never force-edited.                                             |
 | `lost_webhook`                  | Succeeded charge; its durable event is deliberately `dropped` and never sent. Status reconciliation still succeeds.                                                               |
 | `duplicate_webhook`             | Succeeded charge; sends two copies of the **same** durable event/body. Ordinary delivery failure can also cause duplicates.                                                       |
 

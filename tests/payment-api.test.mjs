@@ -7,6 +7,7 @@ import {
   signProcessorWebhook
 } from "../src/payments/protocol.ts";
 import {
+  applyPaymentOutcome,
   applyPaymentWebhook,
   claimCollection,
   getPaymentCollection,
@@ -14,6 +15,7 @@ import {
   markPaymentUncertain,
   preparePaymentAttempt,
   receivePaymentWebhook,
+  recordCollectionNotice,
   releaseCollection
 } from "../src/billing/payments.ts";
 import { database, invoice } from "./helpers/d1.mjs";
@@ -250,7 +252,93 @@ test("payment API method CAS, scenario forwarding, run status and invalid inputs
   assert.equal((await call("POST", "/unknown/path")).status, 404);
 });
 
-test("payment reconciliation reports pending as unresolved, not successful application; terminal/conflict precedence remains", async (t) => {
+test("payment API retry allows one manual attempt after the automatic four; processor controls forward to the mock processor", async (t) => {
+  const { env, inv, owner, attempt, call } = await setup(t);
+  const created = [];
+  env.PAYMENT_WORKFLOW.create = async ({ id, params }) => {
+    created.push(params);
+    return { id };
+  };
+  env.PAYMENT_WORKFLOW.get = async () => ({
+    status: async () => ({ status: "running" })
+  });
+  let current = attempt;
+  for (let n = 1; n <= 4; n++) {
+    if (n > 1) {
+      await recordCollectionNotice(env.DB, owner, {
+        id: `${current.id}:retry`,
+        attemptNumber: current.attemptNumber,
+        kind: "retry_scheduled",
+        message: "test retry slot",
+        deadlineAt: new Date(0).toISOString()
+      });
+      current = (
+        await preparePaymentAttempt(env.DB, owner, new Date(), {
+          ...current,
+          state: "declined",
+          declineType: "soft"
+        })
+      ).attempt;
+    }
+    await applyPaymentOutcome(env.DB, {
+      ...chargePayload(current),
+      processorPaymentId: `processor-${n}`,
+      status: "declined",
+      declineType: "soft"
+    });
+  }
+  await releaseCollection(env.DB, owner);
+  assert.equal((await getPaymentCollection(env.DB, inv.id)).status, "past_due");
+  const retried = await call("POST", `/${inv.id}/retry`);
+  assert.equal(retried.status, 202);
+  assert.equal(retried.data.started, true);
+  assert.deepEqual(
+    [
+      retried.data.collection.attemptLimit,
+      retried.data.collection.attemptsRemaining
+    ],
+    [5, 1]
+  );
+  assert.equal(created.length, 1);
+  // The run owns the collection now: another click starts nothing more
+  const again = await call("POST", `/${inv.id}/retry`);
+  assert.equal(again.data.started, false);
+  assert.equal(again.data.collection.attemptLimit, 5);
+  assert.equal(created.length, 1);
+
+  const forwarded = [];
+  env.PAYMENT_PROCESSOR.fetch = async (request) => {
+    forwarded.push([new URL(request.url).pathname, await request.json()]);
+    return Response.json({ invoiceId: inv.id, eventId: "evt_new" });
+  };
+  const decide = { processorPaymentId: "pay_1", outcome: "succeeded" };
+  assert.equal(
+    (await call("POST", `/${inv.id}/processor/decide`, decide)).data.eventId,
+    "evt_new"
+  );
+  await call("POST", `/${inv.id}/processor/notify`, {
+    processorPaymentId: "pay_1"
+  });
+  await call("POST", `/${inv.id}/processor/deliver`, { eventId: "evt_1" });
+  // The invoice in the path wins over one in the body
+  await call("POST", `/${inv.id}/processor/notify`, {
+    invoiceId: "other",
+    processorPaymentId: "pay_1"
+  });
+  assert.deepEqual(forwarded, [
+    ["/demo/decide", { ...decide, invoiceId: inv.id }],
+    ["/demo/notify", { processorPaymentId: "pay_1", invoiceId: inv.id }],
+    ["/demo/deliver", { eventId: "evt_1", invoiceId: inv.id }],
+    ["/demo/notify", { invoiceId: inv.id, processorPaymentId: "pay_1" }]
+  ]);
+  assert.equal(
+    (await call("POST", `/${inv.id}/processor/reset`, {})).status,
+    404,
+    "only the demo controls are forwarded"
+  );
+});
+
+test("payment reconciliation reports pending as unresolved; a late success after a decline applies, then a decline conflicts", async (t) => {
   const { env, inv, owner, attempt, outcome, call } = await setup(t);
   let charge = { ...outcome, status: "pending" };
   env.PAYMENT_PROCESSOR.fetch = async () => Response.json({ charge });
@@ -275,6 +363,16 @@ test("payment reconciliation reports pending as unresolved, not successful appli
   );
   assert.equal((await getPaymentCollection(env.DB, inv.id)).paidCents, 0);
   charge = outcome;
+  assert.equal(
+    (await call("POST", "/reconcile", { invoiceId: inv.id })).data.checks[0]
+      .result,
+    "applied"
+  );
+  assert.equal(
+    (await getPaymentCollection(env.DB, inv.id)).paidCents,
+    inv.totalCents
+  );
+  charge = { ...outcome, status: "declined", declineType: "hard" };
   assert.equal(
     (await call("POST", "/reconcile", { invoiceId: inv.id })).data.checks[0]
       .result,
@@ -324,7 +422,9 @@ test("foreign-origin mutations are rejected before any financial or processor si
     for (const [method, route] of [
       ["POST", `/${inv.id}/debug-reset`],
       ["POST", `/${inv.id}/collect`],
-      ["POST", `/${inv.id}/settle`],
+      ["POST", `/${inv.id}/retry`],
+      ["POST", `/${inv.id}/processor/decide`],
+      ["POST", `/${inv.id}/processor/deliver`],
       ["PUT", `/${inv.id}/scenarios`],
       ["POST", "/reconcile"],
       ["POST", "/method"]

@@ -104,6 +104,11 @@ export async function runPaymentCollection(
       break;
     }
     const previous = current.attempts.at(-1);
+    // An admin's manual retry of this attempt charges now: no dunning wait.
+    const manualRetry = current.timeline.some(
+      (e) =>
+        e.kind === "manual_retry" && e.attemptNumber === previous?.attemptNumber
+    );
     if (previous?.state === "declined") {
       if (
         previous.declineType === "hard" &&
@@ -165,7 +170,12 @@ export async function runPaymentCollection(
           finished = true;
           break;
         }
-      } else if (previous.declineType === "soft") {
+      } else if (previous.declineType === "soft" && !manualRetry) {
+        // Automatic retries follow attempts 1-3; the clamp is only a guard.
+        const slot = Math.min(
+          previous.attemptNumber - 1,
+          timing.retryMs.length - 1
+        );
         const notice = await step.do(
           `${prefix}-retry-notice`,
           PAYMENT_RETRIES,
@@ -174,10 +184,10 @@ export async function runPaymentCollection(
               id: `${previous.id}:retry`,
               attemptNumber: previous.attemptNumber,
               kind: "retry_scheduled",
-              message: `Dunning retry slot ${previous.attemptNumber} (day ${[1, 3, 7][previous.attemptNumber - 1]} in production).`,
+              message: `Dunning retry slot ${slot + 1} (day ${[1, 3, 7][slot]} in production).`,
               // Each newly declined attempt schedules a distinct slot relative to now, never a catch-up burst.
               deadlineAt: new Date(
-                Date.now() + timing.retryMs[previous.attemptNumber - 1]
+                Date.now() + timing.retryMs[slot]
               ).toISOString()
             })
         );

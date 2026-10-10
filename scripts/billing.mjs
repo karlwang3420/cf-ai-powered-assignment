@@ -26,10 +26,13 @@ const HELP = `Local billing CLI (uses the local D1 database in .wrangler/state)
 
 Setup
   setup                                  apply migrations; seed only an empty database
-  reset                                  DESTRUCTIVE: delete local merchant billing data
+  reset-demo                             reseed everything (billing, mock processor, chats)
+                                         through the running dev server; no restart needed
+  reset                                  DESTRUCTIVE: delete local merchant billing data only
 
 Options: --persist-to=PATH selects isolated persistence (default .wrangler/state).
-Payment commands use the running local API, not direct D1 (--url=http://localhost:5173).
+Payment commands and reset-demo use the running local API, not direct D1
+(--url=http://localhost:5173).
 
 Billing
   customers                              list customers and balances
@@ -49,6 +52,7 @@ Payments (running npm run dev required; no AI calls)
   payment-timeline <invoice-id>           inspect durable notices and correlation IDs
   payment-processor <invoice-id>          inspect processor records and delivery outbox
   collect <invoice-id>                    start/recover bounded collection (may charge)
+  retry <invoice-id>                      after the 4 automatic attempts, one manual attempt (may charge)
   reconcile-payments [invoice-id] [--resume]
                                          drain inbox and compare original keys; resume is opt-in
 
@@ -237,7 +241,9 @@ const paymentCommands = new Set([
   "payment-timeline",
   "payment-processor",
   "collect",
-  "reconcile-payments"
+  "retry",
+  "reconcile-payments",
+  "reset-demo"
 ]);
 async function paymentCommand() {
   const base = new URL(options.url || "http://localhost:5173");
@@ -251,7 +257,10 @@ async function paymentCommand() {
   let route = "/api/payments",
     method = "GET",
     body;
-  if (command === "reconcile-payments") {
+  if (command === "reset-demo") {
+    route = "/api/demo/reset";
+    method = "POST";
+  } else if (command === "reconcile-payments") {
     route += "/reconcile";
     method = "POST";
     body = {
@@ -265,8 +274,9 @@ async function paymentCommand() {
     route += `/${encodeURIComponent(args[0])}`;
     if (command === "payment-timeline") route += "/timeline";
     if (command === "payment-processor") route += "/processor";
-    if (command === "collect") {
-      route += "/collect";
+    const post = { collect: "/collect", retry: "/retry" };
+    if (post[command]) {
+      route += post[command];
       method = "POST";
     }
   }

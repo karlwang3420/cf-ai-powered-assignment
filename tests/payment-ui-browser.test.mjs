@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { chargeActions, chargeState, withState } from "../processor/model.ts";
 import { build } from "esbuild";
 
 const browser =
@@ -68,6 +69,7 @@ const base = {
   balanceCents: 500,
   creditableCents: 500,
   attemptsUsed: 0,
+  attemptLimit: 4,
   attemptsRemaining: 4,
   methodVersion: 1,
   generation: 0,
@@ -137,6 +139,11 @@ test(
     let delayCustomer = null;
     let releaseCustomer;
     let queued = [];
+    // The processor's latest charge and the merchant's view of attempt 1
+    let charge = null;
+    let olderCharge = null;
+    let events = 0;
+    let attemptPatch = {};
     const calls = [];
     const server = createServer(async (req, res) => {
       const url = new URL(req.url, "http://localhost");
@@ -225,8 +232,47 @@ test(
         });
         return;
       }
-      if (url.pathname.endsWith("/settle")) {
-        send({ invoiceId: payment.invoiceId });
+      if (url.pathname.endsWith("/processor/decide")) {
+        charge = withState(charge, body.outcome);
+        // The webhook arrives at once in this fixture
+        if (charge.status === "declined") {
+          payment = {
+            ...payment,
+            status:
+              charge.declineType === "hard" ? "action_required" : "retrying",
+            reservedCents: 0,
+            creditableCents: 500,
+            updatedAt: "2026-10-01T00:00:01.500Z"
+          };
+          attemptPatch = { state: "declined", declineType: charge.declineType };
+        }
+        send({
+          invoiceId: payment.invoiceId,
+          eventId: `evt_${++events}`,
+          charge
+        });
+        return;
+      }
+      if (url.pathname.endsWith("/processor/notify")) {
+        send({
+          invoiceId: payment.invoiceId,
+          eventId: `evt_${++events}`,
+          charge
+        });
+        return;
+      }
+      if (url.pathname.endsWith("/retry")) {
+        payment = {
+          ...payment,
+          status: "processing",
+          attemptsUsed: 5,
+          attemptLimit: 5,
+          attemptsRemaining: 0,
+          reservedCents: 500,
+          ownerActive: 1,
+          updatedAt: "2026-10-01T00:00:05Z"
+        };
+        send({ id: "workflow-manual", started: true, collection: payment });
         return;
       }
       if (url.pathname.endsWith("/debug-reset")) {
@@ -238,11 +284,39 @@ test(
           updatedAt: "2026-10-01T00:00:03Z"
         };
         queued = [];
+        charge = null;
+        attemptPatch = {};
         send({ ...payment, attempts: [], timeline: [] });
         return;
       }
       if (url.pathname.endsWith("/processor")) {
-        send({ invoiceId: payment.invoiceId, scenarios: queued });
+        send({
+          invoiceId: payment.invoiceId,
+          scenarios: queued,
+          // The real processor model decides which controls apply
+          requests: charge
+            ? [
+                {
+                  request: charge,
+                  scenario: "lost_response",
+                  charge,
+                  state: chargeState(charge),
+                  actions: chargeActions(charge)
+                },
+                ...(olderCharge
+                  ? [
+                      {
+                        request: olderCharge,
+                        charge: olderCharge,
+                        state: chargeState(olderCharge),
+                        actions: chargeActions(olderCharge)
+                      }
+                    ]
+                  : [])
+              ]
+            : [],
+          outbox: []
+        });
         return;
       }
       if (url.pathname.endsWith("/scenarios")) {
@@ -252,6 +326,16 @@ test(
       }
       if (url.pathname.endsWith("/collect")) {
         queued = queued.slice(1);
+        charge = {
+          invoiceId: payment.invoiceId,
+          attemptId: "attempt-1",
+          idempotencyKey: "stable-original-key",
+          currency: "USD",
+          methodVersion: 1,
+          processorPaymentId: "processor-1",
+          amountCents: 500,
+          status: "pending"
+        };
         payment = {
           ...payment,
           status: "needs_review",
@@ -327,7 +411,9 @@ test(
                   processorPaymentId: "processor-1",
                   generation: 1,
                   methodVersion: 1,
-                  updatedAt: payment.updatedAt
+                  declineType: null,
+                  updatedAt: payment.updatedAt,
+                  ...attemptPatch
                 }
               ]
             : [],
@@ -428,6 +514,11 @@ test(
       evaluate(
         `Array.from(document.querySelectorAll('[role=tab]')).find(t=>t.textContent===${JSON.stringify(label)}).click()`
       );
+    // Processor charge actions, in the order the processor lists them
+    const chargeButtons = () =>
+      evaluate(
+        "Array.from(document.querySelectorAll('[role=dialog] button')).map(b=>b.textContent.trim()).filter(t=>['Succeeds','Soft decline','Hard decline','Send webhook'].includes(t))"
+      );
     const dialogText = () =>
       evaluate("document.querySelector('[role=dialog]')?.innerText ?? ''");
 
@@ -464,14 +555,35 @@ test(
     await waitText("Result unknown · waiting for the processor");
     await waitText("Collect blocked: $5.00 held for an unresolved charge");
     assert.equal(await buttonDisabled("Collect"), true);
-    // An unresolved charge locks the queue but can be settled at the processor.
+    // Mock controls show the processor's charge and the actions its state
+    // model allows: a pending charge can be decided any way
     await tab("Mock controls");
-    await waitText("Locked while a charge is unresolved");
-    await click("Soft decline");
-    await waitText("Processor settled the charge: soft decline");
-    assert.deepEqual(calls.findLast((c) => c.path.endsWith("/settle")).body, {
-      outcome: "soft_decline"
-    });
+    await waitText("Mock payment state · pending");
+    assert.deepEqual(await chargeButtons(), [
+      "Succeeds",
+      "Soft decline",
+      "Hard decline"
+    ]);
+    await click("Hard decline");
+    await waitText("Processor settled the charge: hard decline.");
+    assert.deepEqual(
+      calls.findLast((c) => c.path.endsWith("/processor/decide")).body,
+      { processorPaymentId: "processor-1", outcome: "hard_decline" }
+    );
+    // The same outcome control also works after a hard decline.
+    await waitText("Waiting for a newer card");
+    await waitText("Mock payment state · hard decline");
+    await waitText("Simulated card · version 1 · hard declined");
+    assert.deepEqual(await chargeButtons(), ["Succeeds"]);
+    const declinedCharge = { ...charge };
+    await click("Succeeds");
+    await waitText("Processor settled the charge: succeeded.");
+    await waitText("Mock payment state · succeeded");
+    assert.deepEqual(await chargeButtons(), []);
+    assert.equal(
+      calls.some((c) => c.path.endsWith("/processor/notify")),
+      false
+    );
     await tab("Activity");
     await waitText("Durable recovery notice");
     await tab("Debug");
@@ -521,7 +633,7 @@ test(
     await until(() => Boolean(releaseReconcile), "delayed reconciliation");
     await waitText("Reconciling…");
     assert.equal(await buttonDisabled("Reconcile"), true);
-    assert.equal(await buttonDisabled("Simulate card update"), true);
+    assert.equal(await buttonDisabled("Reconcile + resume"), true);
     // Closing mid-request must not surface the late result anywhere.
     await evaluate(
       "document.querySelector('[role=dialog] button[aria-label=Close]').click()"
@@ -566,6 +678,50 @@ test(
       calls.filter((c) => c.path.endsWith("/debug-reset")).length,
       1
     );
+
+    // Out of automatic attempts: Collect becomes a manual retry
+    const unpaid = payment;
+    payment = {
+      ...payment,
+      status: "past_due",
+      attemptsUsed: 4,
+      attemptsRemaining: 0,
+      needsAttention: 1,
+      updatedAt: "2026-10-01T00:00:04Z"
+    };
+    attemptPatch = { state: "declined", declineType: "soft" };
+    charge = withState(declinedCharge, "soft_decline");
+    olderCharge = withState(
+      {
+        ...declinedCharge,
+        attemptId: "older-attempt",
+        processorPaymentId: "older-payment"
+      },
+      "soft_decline"
+    );
+    await click("Reconcile");
+    await tab("Mock controls");
+    await waitText("Mock payment state · soft decline");
+    assert.deepEqual(
+      await chargeButtons(),
+      ["Succeeds"],
+      "one set of current-payment controls, not one per historical charge"
+    );
+    await click("Succeeds");
+    await waitText("Mock payment state · succeeded");
+    assert.deepEqual(
+      calls.findLast((c) => c.path.endsWith("/processor/decide")).body,
+      { processorPaymentId: "processor-1", outcome: "succeeded" }
+    );
+    await waitText("Automatic attempts used · retry manually");
+    await waitText("4 of 4 used");
+    assert.equal(await buttonDisabled("Retry payment"), false);
+    await click("Retry payment");
+    await waitText("Manual retry started: one attempt.");
+    await waitText("5 of 5 used · 1 manual");
+    assert.equal(calls.filter((c) => c.path.endsWith("/retry")).length, 1);
+    payment = unpaid;
+    attemptPatch = {};
     await evaluate(
       "document.querySelector('[role=dialog] button[aria-label=Close]').click()"
     );

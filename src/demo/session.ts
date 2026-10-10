@@ -22,6 +22,17 @@ export type DemoStatus = {
   reset: boolean;
 };
 
+/**
+ * Local dev, where `GET /api/demo` has no shared demo to report. The demo can
+ * still be reset to the seed from the running server.
+ */
+export type LocalDemoStatus = {
+  enabled: false;
+  resettable: boolean;
+  /** This request reseeded the demo */
+  reset?: boolean;
+};
+
 export const emptyDemoState = (): DemoState => ({
   lastActivity: null,
   lastResetAt: null,

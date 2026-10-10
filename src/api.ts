@@ -20,7 +20,7 @@ import {
 } from "./billing/store.ts";
 
 import type { DemoEnv } from "./demo/gate.ts";
-import type { DemoStatus } from "./demo/session.ts";
+import type { DemoStatus, LocalDemoStatus } from "./demo/session.ts";
 import { isCrossSite } from "./origin.ts";
 import { handlePaymentApi } from "./payments/api.ts";
 import { paymentLog, type PaymentEnv } from "./payments/service.ts";
@@ -145,13 +145,29 @@ export async function handleApi(
       case "POST invoice-runs":
         return await startInvoiceRun(env, request, now);
       case "GET demo":
-        return json(demo ?? { enabled: false });
+        return json(
+          demo ??
+            ({
+              enabled: false,
+              resettable: Boolean(env.DEMO_SESSION)
+            } satisfies LocalDemoStatus)
+        );
       case "POST demo/:id":
         if (parts.length !== 2 || parts[1] !== "reset") break;
-        if (!demo || !env.DEMO_SESSION) break;
+        // No demo status means local dev: the gate serves only loopback then
+        if (!env.DEMO_SESSION) break;
         // Admitting this request may already have reset the demo
-        if (demo.reset) return json(demo);
-        return json(await env.DEMO_SESSION.getByName("demo").reset());
+        if (demo?.reset) return json(demo);
+        const reset = await env.DEMO_SESSION.getByName("demo").reset();
+        return json(
+          demo
+            ? reset
+            : ({
+                enabled: false,
+                resettable: true,
+                reset: true
+              } satisfies LocalDemoStatus)
+        );
       case "GET invoice-runs/:id": {
         let instance: WorkflowInstance;
         try {

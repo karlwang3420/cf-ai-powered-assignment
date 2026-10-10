@@ -57,21 +57,21 @@ provider reads the stream.
 
 [`invoice-workflow.ts`](../src/invoice-workflow.ts) checkpoints opening the draft
 invoice (closing the month to new usage), finalization (price, lines and ledger
-atomically), ledger reconciliation, and starting a separate payment collection
-Workflow. Bad input (unknown customer, month not ended) fails immediately
+atomically) and ledger reconciliation. It does not collect payment: an admin
+starts the separate payment Workflow with **Collect**, after optionally choosing
+a mock processor outcome. Bad input (unknown customer, month not ended) fails immediately
 instead of retrying. Every billing operation is idempotent, so a repeated step
 is harmless.
 
 Billing starts with a customer's first full month; there is no proration.
-New UI invoice runs automatically collect. CLI-finalized invoices remain
-available for configuring a payment scenario before collection.
 
 ## Payment collection
 
 [`payment-workflow.md`](payment-workflow.md) contains the detailed design and
 implementation/validation map. `PaymentWorkflow` persists immutable attempts
-and reservations before contacting the mock processor. At most four new attempts
-share a lifetime budget; transport retries reuse the same key/payload. Unknown
+and reservations before contacting the mock processor. Four automatic attempts
+share one budget; after that, each admin **Retry payment** allows exactly one
+more attempt. Transport retries reuse the same key/payload. Unknown
 money remains reserved, even after the run ends in needs-review. Shared D1
 reconciliation applies processor responses, lookups and signed webhooks once,
 including late success after Workflow completion.
@@ -98,7 +98,7 @@ Migrations:
 | `invoices`, `invoice_lines`                                       | Monthly invoices and their line items                                |
 | `credits`                                                         | Approved credits against finalized invoices                          |
 | `ledger_entries`                                                  | Append-only double-entry ledger, including cash/payment postings     |
-| `payment_collections`, `payment_attempts`, `payment_reservations` | Ownership, lifetime attempt budget and unresolved money              |
+| `payment_collections`, `payment_attempts`, `payment_reservations` | Ownership, attempt budget and unresolved money                       |
 | `payments`, `payment_webhook_inbox`, `payment_timeline`           | Posted payments, durable receipt/application and notices             |
 
 ### Invariants

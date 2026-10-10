@@ -12,6 +12,7 @@ import {
   receiveWebhook,
   debugResetCollection,
   reconcilePaymentCollections,
+  retryCollection,
   startCollection,
   type PaymentEnv
 } from "./service.ts";
@@ -138,6 +139,10 @@ export async function handlePaymentApi(
       return Response.json(await startCollection(env, invoiceId), {
         status: 202
       });
+    if (request.method === "POST" && path[2] === "retry")
+      return Response.json(await retryCollection(env, invoiceId), {
+        status: 202
+      });
     if (request.method === "POST" && path[2] === "debug-reset")
       return Response.json(await debugResetCollection(env, invoiceId));
     if (request.method === "GET" && path[2] === "timeline")
@@ -149,13 +154,6 @@ export async function handlePaymentApi(
         env,
         `/demo/inspect?invoiceId=${encodeURIComponent(invoiceId)}`
       );
-    if (request.method === "POST" && path[2] === "settle") {
-      const body = await bodyOf(request);
-      return processorRequest(env, "/demo/settle", "POST", {
-        invoiceId,
-        outcome: body.outcome
-      });
-    }
     if (request.method === "PUT" && path[2] === "scenarios") {
       const body = await bodyOf(request);
       return processorRequest(env, "/demo/scenarios", "PUT", {
@@ -176,6 +174,20 @@ export async function handlePaymentApi(
         return Response.json({ id: c.workflowId, status: "unavailable" });
       }
     }
+  }
+  // Mock processor controls for this invoice; the processor validates them
+  if (
+    path.length === 4 &&
+    request.method === "POST" &&
+    path[2] === "processor" &&
+    ["decide", "notify", "deliver"].includes(path[3])
+  ) {
+    const invoiceId = action;
+    await getPaymentCollection(env.DB, invoiceId);
+    return processorRequest(env, `/demo/${path[3]}`, "POST", {
+      ...(await bodyOf(request)),
+      invoiceId
+    });
   }
   return Response.json(
     { error: { code: "not_found", message: "unknown payment route" } },

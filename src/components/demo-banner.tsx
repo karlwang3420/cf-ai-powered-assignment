@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text } from "@cloudflare/kumo";
 import { UsersThreeIcon } from "@phosphor-icons/react";
-import type { DemoStatus } from "../demo/session";
+import type { DemoStatus, LocalDemoStatus } from "../demo/session";
 import { api } from "../client-api";
 
 const POLL_MS = 30_000;
 
 /**
- * Hosted demo only: everyone who signs in shares one copy of the data. Says
- * when it resets, whether someone else is using it, and offers a reset;
- * renders nothing in local dev. Status is re-read while the page is open.
+ * Hosted demo: everyone who signs in shares one copy of the data. Says when it
+ * resets, whether someone else is using it, and offers a reset. Local dev
+ * offers only the reset, so reseeding needs no restart. Status is re-read
+ * while the page is open.
  */
 export function DemoBanner() {
-  const [status, setStatus] = useState<DemoStatus | null>(null);
+  const [status, setStatus] = useState<DemoStatus | LocalDemoStatus | null>(
+    null
+  );
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,8 +27,8 @@ export function DemoBanner() {
     api
       .demo()
       .then((s) => {
-        if (!mounted.current || !s.enabled) return;
-        if (loadedAfter.current === undefined)
+        if (!mounted.current) return;
+        if (s.enabled && loadedAfter.current === undefined)
           loadedAfter.current = s.lastResetAt;
         setStatus(s);
       })
@@ -42,8 +45,9 @@ export function DemoBanner() {
     };
   }, [refresh]);
 
-  if (!status) return null;
+  if (!status || (!status.enabled && !status.resettable)) return null;
   const resetElsewhere =
+    status.enabled &&
     loadedAfter.current !== undefined &&
     status.lastResetAt !== loadedAfter.current;
 
@@ -65,10 +69,11 @@ export function DemoBanner() {
     <div className="px-5 py-2 bg-kumo-base border-b border-kumo-line flex flex-wrap items-center gap-x-3 gap-y-2">
       <UsersThreeIcon size="1rem" className="text-kumo-subtle shrink-0" />
       <Text size="xs" variant="secondary">
-        Shared demo: everyone who signs in sees the same data. It returns to the
-        seed when someone new signs in after {status.idleMinutes} minutes
-        without activity.
-        {status.othersActive &&
+        {status.enabled
+          ? `Shared demo: everyone who signs in sees the same data. It returns to the seed when someone new signs in after ${status.idleMinutes} minutes without activity.`
+          : "Local demo data."}
+        {status.enabled &&
+          status.othersActive &&
           ` Someone else has used it in the last ${status.idleMinutes} minutes.`}
         {resetElsewhere &&
           " The demo has been reset since this page loaded; reload to see it."}
@@ -87,8 +92,8 @@ export function DemoBanner() {
         {confirming ? (
           <>
             <Text size="xs" variant="secondary">
-              Reset every customer's invoices, payments, credits and chats for
-              everyone?
+              Reset every customer's invoices, payments, credits and chats
+              {status.enabled ? " for everyone" : " to the seed"}?
             </Text>
             <Button
               size="sm"

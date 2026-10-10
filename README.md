@@ -44,7 +44,13 @@ npm run dev
 Open <http://localhost:5173>. Vite starts both the app and mock payment processor.
 `db:setup` applies migrations and seeds demo customers only when the database is
 empty; it preserves existing data. Stop dev before running setup or direct-file
-billing CLI commands, especially on Windows.
+billing CLI commands, especially on Windows: the running dev server holds the
+database files open.
+
+To return everything to the seed (billing data, mock processor and chats),
+click **Reset demo** in the banner, or run `npm run billing -- reset-demo`.
+Both run inside the dev server, so it keeps running, and they leave the
+database on the latest migrations.
 
 **Local demo:** there is no authentication. Keep the app and local Explorer
 private; without the hosted demo's Access settings, the API answers only on
@@ -77,8 +83,9 @@ if you want to run without remote bindings.
 ![Admin view with invoice runner, collection filters and payment status table](docs/images/admin-invoices.png)
 
 Switch to **Admin** (or open `/admin`). Choose a customer and an ended month,
-then click **Run invoice**. The Workflow finalizes the invoice and automatically
-starts mock payment collection; the default outcome is success.
+then click **Run invoice**. The Workflow finalizes the invoice but charges
+nothing yet: its payment dialog opens so you can pick a mock outcome first, then
+click **Collect**. With no outcome chosen, the charge succeeds.
 
 Use **All statuses / Needs attention** and the customer filter to narrow the
 collection table. Click an invoice row to open its payment controls.
@@ -89,33 +96,37 @@ new collection runs.
 
 ![Invoice payment dialog showing Collect, reconciliation actions, mock scenario and simulated card update](docs/images/payment-controls.png)
 
-To choose a scenario **before** collection, prepare an unpaid invoice with dev
-stopped. For example, on a fresh demo database:
-
-```sh
-npm run billing -- invoice cus_acme 2026-09
-npm run dev
-```
-
-CLI finalization does not start collection. Replaying it does not undo an
-already-paid invoice; see [isolated demo setup](docs/local-testing.md#safe-setup-and-isolation)
-for a fresh sandbox.
-
-On the hosted demo, run the invoice in Admin, then open it and use **Debug →
-Reset to unpaid** to get an uncollected invoice.
-
-1. Open the invoice in **Admin → Mock controls** and choose a scenario. It
-   applies immediately to future attempts, not past ones.
+1. Run an invoice (or open an uncollected one) and choose a scenario in **Mock
+   controls**. It applies immediately to future attempts, not past ones.
 2. Click **Collect**. For **Hard decline → success**, click **Simulate card
    update** while the Workflow waits for a newer card.
 3. **Reconcile** checks original processor keys and unapplied webhooks.
    **Reconcile + resume** also permits a new collection run and may charge the
-   remaining mock balance. Neither bypasses the four-attempt limit.
+   remaining mock balance. Neither goes past the four automatic attempts.
+4. After four declines the invoice is past due and **Collect** becomes **Retry
+   payment**: each click is one manual attempt, charged at once. Pick the next
+   outcome in Mock controls first. A hard decline needs **Simulate card update**
+   before retrying.
 
-**Held** means the processor result is unresolved, not failed. With the
-unresolved-pending scenario, **Settle pending charge** appears in Mock controls
-so you can send a late success or decline. See the [payment walkthrough](docs/local-testing.md#payment-walkthrough)
-for timing, retry limits and more scenarios.
+**Mock controls** show the mock processor's own state beside the invoice's:
+the queue of outcomes for its next charges, and each charge it holds with its
+state and webhook deliveries. Each charge offers only the actions the
+processor's [state model](processor/README.md#state-model) allows:
+
+| Charge state | Actions                                            |
+| ------------ | -------------------------------------------------- |
+| Pending      | Succeeds, Soft decline, Hard decline, Send webhook |
+| Declined     | Succeeds (a late success), Send webhook            |
+| Succeeded    | Send webhook                                       |
+
+Every state change sends a signed webhook, and **Send webhook** sends a new
+event for the current state. A dropped (lost-webhook) or given-up delivery can
+be delivered again. The processor never looks at billing data; the billing side
+decides what each webhook means. A late success after four soft declines pays
+the invoice without a new charge. If it is not safe, for example because a
+newer attempt is already charging, the invoice shows a conflict instead.
+**Held** means the processor result is unresolved, not failed. See the [payment walkthrough](docs/local-testing.md#payment-walkthrough) for
+timing, retry limits and more scenarios.
 
 ### 4. Inspect what happened
 

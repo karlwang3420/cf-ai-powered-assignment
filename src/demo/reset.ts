@@ -13,6 +13,40 @@ async function ids(db: D1Database, sql: string): Promise<string[]> {
   }
 }
 
+/**
+ * Agent.destroy() deliberately aborts its isolate after deleting storage. In
+ * production that abort can reject the RPC, even though teardown succeeded.
+ * Accept only that exact signal, and always verify through a fresh agent.
+ */
+export async function destroyAndVerifyChat(
+  destroy: () => Promise<void>,
+  history: () => Promise<unknown>
+) {
+  try {
+    await destroy();
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "destroyed") throw error;
+  }
+  // The scheduled isolate abort can also hit the very next RPC. Reacquire
+  // the stub and retry that exact reset signal, with a bounded backoff.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const messages = await history();
+      if (!Array.isArray(messages) || messages.length !== 0)
+        throw new Error("chat history was not cleared");
+      return;
+    } catch (error) {
+      if (
+        attempt >= 3 ||
+        !(error instanceof Error) ||
+        error.message !== "destroyed"
+      )
+        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
 // Only these states mean the run cannot resume; "unknown" proves nothing
 const ENDED = ["complete", "errored", "terminated"];
 
@@ -38,14 +72,15 @@ async function stopRun(env: PaymentEnv, id: string) {
 }
 
 /**
- * Returns the hosted demo to its seed: stops collection runs, clears the mock
+ * Returns the demo (hosted, or local dev) to its seed: stops collection runs, clears the mock
  * processor, rebuilds D1 and deletes each customer's chat. The processor is
  * cleared before D1 so no old charge can replay or call back into fresh data.
  */
 export async function resetDemo(
   env: PaymentEnv,
   scripts: string[],
-  clearChat: (customerId: string) => Promise<void>
+  clearChat: (customerId: string) => Promise<void>,
+  migrations: string[] = []
 ) {
   const runs = await ids(
     env.DB,
@@ -59,7 +94,7 @@ export async function resetDemo(
       `processor reset failed (${processor.status}); nothing was changed`
     );
   const before = await ids(env.DB, "SELECT id FROM customers");
-  await rebuildDatabase(env.DB, scripts);
+  await rebuildDatabase(env.DB, scripts, migrations);
   const customers = [
     ...new Set([...before, ...(await ids(env.DB, "SELECT id FROM customers"))])
   ];
@@ -68,7 +103,8 @@ export async function resetDemo(
   for (const id of customers) {
     try {
       await clearChat(id);
-    } catch {
+    } catch (error) {
+      console.error("Demo chat teardown failed", id, error);
       failed.push(id);
     }
   }

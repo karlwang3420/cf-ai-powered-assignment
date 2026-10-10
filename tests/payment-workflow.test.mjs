@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runPaymentCollection } from "../src/payments/collection.ts";
-import { chargePayload, startCollection } from "../src/payments/service.ts";
+import {
+  chargePayload,
+  retryCollection,
+  startCollection
+} from "../src/payments/service.ts";
 import {
   applyPaymentOutcome,
   claimCollection,
@@ -223,6 +227,67 @@ test("PaymentWorkflow four soft declines share the lifetime budget and three dur
   const next = await claimCollection(env.DB, owner.invoiceId, owner.generation);
   await runPaymentCollection(env, next, steps(t));
   assert.equal(env.PAYMENT_PROCESSOR.posts, 4);
+});
+
+test("PaymentWorkflow manual retry after four soft declines charges once at once, then stops again", async (t) => {
+  const { env, owner } = await setup(t, [
+    "soft",
+    "soft",
+    "soft",
+    "soft",
+    "soft",
+    "success"
+  ]);
+  await runPaymentCollection(env, owner, steps(t));
+  const run = async () => {
+    const started = await retryCollection(env, owner.invoiceId);
+    assert.equal(started.started, true);
+    const step = steps(t);
+    const result = await runPaymentCollection(
+      env,
+      env.PAYMENT_WORKFLOW.instances.get(started.id).params,
+      step
+    );
+    // A manual attempt skips the dunning wait
+    assert.equal(step.calls.filter((c) => c[0] === "sleepUntil").length, 0);
+    return result;
+  };
+  assert.deepEqual(Object.values(await run()).slice(1), ["past_due", 5]);
+  assert.equal(env.PAYMENT_PROCESSOR.posts, 5);
+  assert.deepEqual(Object.values(await run()).slice(1), ["paid", 6]);
+  assert.equal(env.PAYMENT_PROCESSOR.posts, 6);
+  const c = await getPaymentCollection(env.DB, owner.invoiceId);
+  assert.deepEqual([c.attemptLimit, c.attemptsRemaining], [6, 0]);
+  assert.deepEqual(
+    c.timeline
+      .filter((e) => e.kind === "manual_retry")
+      .map((e) => e.attemptNumber),
+    [4, 5]
+  );
+  assert.equal(
+    c.timeline.filter((e) => e.kind === "retry_scheduled").length,
+    3,
+    "only the automatic attempts were dunned"
+  );
+});
+
+test("PaymentWorkflow ends paid when a decline turns into a late success during the card wait", async (t) => {
+  const { env, owner } = await setup(t, ["hard"]);
+  const result = await runPaymentCollection(
+    env,
+    owner,
+    steps(t, async () => {
+      const [charge] = env.PAYMENT_PROCESSOR.charges.values();
+      const { declineType, ...rest } = charge;
+      assert.equal(declineType, "hard");
+      await applyPaymentOutcome(env.DB, { ...rest, status: "succeeded" });
+    })
+  );
+  assert.equal(result.status, "paid");
+  assert.equal(result.attemptsUsed, 1);
+  assert.equal(env.PAYMENT_PROCESSOR.posts, 1, "no second charge");
+  const c = await getPaymentCollection(env.DB, owner.invoiceId);
+  assert.deepEqual([c.paidCents, c.reservedCents], [c.totalCents, 0]);
 });
 
 test("PaymentWorkflow repeated hard declines require newer methods and still stop at four", async (t) => {

@@ -4,8 +4,15 @@ import type {
   PaymentDetail,
   PaymentInboxEvent
 } from "./billing/payments";
-import type { DemoStatus } from "./demo/session";
-import type { ProcessorScenario } from "./payments/protocol";
+import type { DemoStatus, LocalDemoStatus } from "./demo/session";
+import type {
+  ChargeState,
+  ProcessorCharge,
+  ProcessorInspection,
+  ProcessorScenario
+} from "./payments/protocol";
+
+export type { ProcessorInspection };
 import type { reconcilePaymentCollections } from "./payments/service";
 import type {
   CustomerSummary,
@@ -26,6 +33,13 @@ export type PaymentRun = {
     attemptsUsed: number;
   };
   error?: { name: string; message: string } | null;
+};
+
+/** A demo control's result: the new event and the charge it carries. */
+export type ProcessorAction = {
+  invoiceId: string;
+  eventId: string;
+  charge: ProcessorCharge;
 };
 
 const paymentPath = (id: string) => `/api/payments/${encodeURIComponent(id)}`;
@@ -85,6 +99,12 @@ export const api = {
       `${paymentPath(id)}/collect`,
       { method: "POST" }
     ),
+  /** Admin retry: once automatic attempts are used, allows one manual attempt. */
+  retryPayment: (id: string) =>
+    request<{ id: string | null; started: boolean; collection: PaymentDetail }>(
+      `${paymentPath(id)}/retry`,
+      { method: "POST" }
+    ),
   /** Omit invoiceId to reconcile every invoice and unapplied event. */
   reconcilePayments: (invoiceId?: string, resume = false) =>
     request<PaymentReconciliation>(
@@ -101,18 +121,31 @@ export const api = {
     request<PaymentDetail>(`${paymentPath(id)}/debug-reset`, {
       method: "POST"
     }),
-  /** Mock processor decides this invoice's pending charge; the webhook follows. */
-  settlePendingCharge: (
+  /** Mock processor moves a charge to another state and sends its webhook. */
+  decideCharge: (
     id: string,
-    outcome: "succeeded" | "soft_decline" | "hard_decline"
+    processorPaymentId: string,
+    outcome: ChargeState
   ) =>
-    request<{ invoiceId: string }>(
-      `${paymentPath(id)}/settle`,
-      jsonBody("POST", { outcome })
+    request<ProcessorAction>(
+      `${paymentPath(id)}/processor/decide`,
+      jsonBody("POST", { processorPaymentId, outcome })
     ),
-  /** Mock processor's remaining outcome queue for this invoice. */
+  /** Mock processor sends a new event for a charge's current state. */
+  notifyCharge: (id: string, processorPaymentId: string) =>
+    request<ProcessorAction>(
+      `${paymentPath(id)}/processor/notify`,
+      jsonBody("POST", { processorPaymentId })
+    ),
+  /** Mock processor sends a dropped or given-up event again. */
+  deliverEvent: (id: string, eventId: string) =>
+    request<{ invoiceId: string; eventId: string }>(
+      `${paymentPath(id)}/processor/deliver`,
+      jsonBody("POST", { eventId })
+    ),
+  /** Mock processor's outcome queue, charges and deliveries for this invoice. */
   paymentProcessor: (id: string) =>
-    request<{ scenarios: ProcessorScenario[] }>(`${paymentPath(id)}/processor`),
+    request<ProcessorInspection>(`${paymentPath(id)}/processor`),
   paymentScenarios: (id: string, scenarios: ProcessorScenario[]) =>
     request<{ invoiceId: string; scenarios: ProcessorScenario[] }>(
       `${paymentPath(id)}/scenarios`,
@@ -132,8 +165,8 @@ export const api = {
   invoiceRun: (id: string) =>
     request<InvoiceRun>(`/api/invoice-runs/${encodeURIComponent(id)}`),
   /** Hosted demo status; `enabled: false` in local dev. */
-  demo: () => request<DemoStatus | { enabled: false }>("/api/demo"),
-  /** Hosted demo only: return every customer to the seed, for everyone. */
+  demo: () => request<DemoStatus | LocalDemoStatus>("/api/demo"),
+  /** Return every customer to the seed; hosted, that is for everyone. */
   resetDemo: () => request<DemoStatus>("/api/demo/reset", { method: "POST" })
 };
 
