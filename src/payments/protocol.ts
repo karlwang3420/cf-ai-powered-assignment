@@ -5,6 +5,8 @@ export const PROCESSOR_TIMESTAMP_HEADER = "x-processor-timestamp";
 export const PROCESSOR_SIGNATURE_HEADER = "x-processor-signature";
 export const WEBHOOK_TOLERANCE_SECONDS = 300;
 export const PROCESSOR_WEBHOOK_PATH = "/api/payments/webhook";
+/** The callback goes over a service binding; no public request has this host. */
+export const PROCESSOR_CALLBACK_ORIGIN = "https://merchant.internal";
 
 /** This exact payload is persisted by the merchant before the first POST. */
 export type ChargeRequest = {

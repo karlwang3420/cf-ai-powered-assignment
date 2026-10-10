@@ -11,7 +11,11 @@ on their machine. Everyone who signs in shares one copy of the data.
   `Cf-Access-Jwt-Assertion` token on every API and chat request
   ([`src/demo/gate.ts`](../src/demo/gate.ts)), so a missing or misconfigured
   Access application fails closed. A Worker deployed without the Access
-  settings answers API requests only on `localhost`.
+  settings answers API requests only on `localhost`. The processor's signed
+  callback is the only exception, and only over the service binding.
+- **Same-site only.** Chat connections from another site are refused, so a
+  page a reviewer visits cannot use their Access session to chat
+  ([`src/origin.ts`](../src/origin.ts)); API mutations have the same check.
 - **Fresh data for each reviewer.** A singleton `DemoSession` Durable Object
   sees every request. A new Access session reseeds the demo only when nobody
   has made a request for 15 minutes, so overlapping reviewers never wipe each
@@ -21,8 +25,12 @@ on their machine. Everyone who signs in shares one copy of the data.
 - **What a reset clears.** It stops active payment runs, clears the mock
   processor (keys, deliveries, scenarios), rebuilds D1 from the bundled
   migrations and seed in one atomic batch, and deletes each customer's chat.
-  Other requests wait until it finishes. The first signed-in request after
-  deploy seeds the empty database the same way.
+  Requests that arrive during a reset wait until it finishes. The first
+  signed-in request after deploy seeds the empty database the same way.
+  Requests and invoice runs already in progress are not stopped, so a
+  **Reset demo** clicked while someone is working can be followed by a few of
+  their writes. Automatic resets happen only after 15 idle minutes, when
+  nothing is in progress.
 - **Nothing else is public.** The mock processor has no `workers.dev` URL and is
   reachable only through the service binding; its demo credentials are public
   in this repository. Preview and version URLs are off for both Workers, since
@@ -43,7 +51,9 @@ You need a Cloudflare account with Workers and Zero Trust (Access) enabled.
    Applications**, add a **self-hosted** application for the hostname above.
    Do not use the Worker's own **Access** tab: Worker-level Access rejects
    WebSocket upgrades, which the chat needs. Add an **Allow** policy, for
-   example the email domain `cloudflare.com` plus your own email.
+   example the email domain `cloudflare.com` plus your own email. In the
+   application's cookie settings, set **SameSite attribute** to **Lax**, so
+   the Access cookie is not sent with requests from other sites.
 4. **Copy two values.** Your team domain (`<team>.cloudflareaccess.com`, under
    **Settings → Team name and domain**) and the application's **Application
    Audience (AUD) Tag**.

@@ -57,6 +57,21 @@ async function signIn(issuer, sub) {
   return `${body}.${Buffer.from(signature).toString("base64url")}`;
 }
 
+/** Whether a browser-like chat socket from `from` gets through. */
+async function chatConnects(origin, token, from) {
+  const socket = new WebSocket(
+    `${origin.replace("http", "ws")}/agents/billing-assistant/cus_acme`,
+    { headers: { "Cf-Access-Jwt-Assertion": token, Origin: from } }
+  );
+  const opened = await new Promise((resolve) => {
+    socket.addEventListener("open", () => resolve(true));
+    socket.addEventListener("error", () => resolve(false));
+    setTimeout(() => resolve(false), 10_000);
+  });
+  socket.close();
+  return opened;
+}
+
 /** Saves chat messages over the socket, as the chat UI does. */
 async function saveChat(origin, token, messages) {
   const socket = new WebSocket(
@@ -172,6 +187,33 @@ test(
     );
     const charged = (await asAlice("/payments/inv_cus_acme_2026-09/processor"))
       .body.requests[0].charge.processorPaymentId;
+    // The processor's signed callback still reaches the gated Worker over the
+    // service binding; the same path from outside needs Access
+    await eventually(
+      () => asAlice("/payments/inv_cus_acme_2026-09/processor"),
+      (r) =>
+        r.body.outbox.length > 0 &&
+        r.body.outbox.every((e) => e.state === "delivered")
+    );
+    assert.equal((await as(null)("/payments/webhook", "POST", {})).status, 403);
+
+    // A page on another site cannot chat with a reviewer's Access session
+    assert.equal(await chatConnects(origin, alice, origin), true);
+    assert.equal(
+      await chatConnects(origin, alice, "https://evil.example"),
+      false
+    );
+    const crossSite = await fetch(
+      `${origin}/agents/billing-assistant/cus_acme/get-messages`,
+      {
+        headers: {
+          "Cf-Access-Jwt-Assertion": alice,
+          Origin: "https://evil.example"
+        }
+      }
+    );
+    assert.equal(crossSite.status, 403);
+    assert.match(await crossSite.text(), /Cross-origin agent requests/);
     await saveChat(origin, alice, [
       { id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] }
     ]);

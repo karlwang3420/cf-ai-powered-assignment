@@ -14,6 +14,11 @@ import {
 import { accessSession, verifyAccessJwt } from "../src/demo/access.ts";
 import { rebuildDatabase } from "../src/demo/database.ts";
 import { admitDemoRequest } from "../src/demo/gate.ts";
+import { refuseCrossSiteAgent } from "../src/origin.ts";
+import {
+  PROCESSOR_CALLBACK_ORIGIN,
+  PROCESSOR_WEBHOOK_PATH
+} from "../src/payments/protocol.ts";
 import { resetDemo } from "../src/demo/reset.ts";
 import {
   admitSession,
@@ -279,6 +284,10 @@ function demoEnv(overrides = {}) {
 }
 const request = (path, init = {}) =>
   new Request(`https://demo.example${path}`, init);
+const callback = () =>
+  new Request(`${PROCESSOR_CALLBACK_ORIGIN}${PROCESSOR_WEBHOOK_PATH}`, {
+    method: "POST"
+  });
 
 test("hosted demo requests need a valid Access token; local dev is unaffected", async () => {
   const verify = async (value) =>
@@ -305,6 +314,11 @@ test("hosted demo requests need a valid Access token; local dev is unaffected", 
     "deployed without Access settings fails closed"
   );
   assert.equal(await admitDemoRequest(request("/"), local, verify), null);
+  assert.equal(
+    await admitDemoRequest(callback(), local, verify),
+    null,
+    "local dev receives the processor callback"
+  );
 
   const env = demoEnv();
   assert.equal(await admitDemoRequest(request("/"), env, verify), null);
@@ -318,17 +332,29 @@ test("hosted demo requests need a valid Access token; local dev is unaffected", 
     403
   );
   assert.equal(
-    await admitDemoRequest(
-      request("/api/payments/webhook", { method: "POST" }),
-      env,
-      verify
-    ),
+    await admitDemoRequest(callback(), env, verify),
     null,
     "the processor's signed callback arrives over the service binding"
   );
   assert.equal(
-    (await admitDemoRequest(request("/api/payments/webhook"), env, verify))
-      .status,
+    (
+      await admitDemoRequest(
+        request("/api/payments/webhook", { method: "POST" }),
+        env,
+        verify
+      )
+    ).status,
+    403,
+    "the same path from the Internet needs Access"
+  );
+  assert.equal(
+    (
+      await admitDemoRequest(
+        new Request("https://merchant.internal/api/payments/webhook"),
+        env,
+        verify
+      )
+    ).status,
     403,
     "only the exact callback is exempt"
   );
@@ -354,6 +380,32 @@ test("hosted demo requests need a valid Access token; local dev is unaffected", 
     (await admitDemoRequest(withToken("/api/customers", "good"), env, failing))
       .status,
     503
+  );
+});
+
+test("chat agents refuse cross-site browser requests, locally and hosted", () => {
+  const agent = (
+    headers,
+    url = "http://localhost:5173/agents/billing-assistant/cus_acme"
+  ) => refuseCrossSiteAgent(new Request(url, { headers }));
+  assert.equal(agent({}), null, "CLI and tests send no Origin");
+  assert.equal(
+    agent({ Origin: "http://localhost:5173", Upgrade: "websocket" }),
+    null
+  );
+  assert.equal(
+    agent({ Origin: "https://evil.example", Upgrade: "websocket" }).status,
+    403
+  );
+  assert.equal(agent({ "Sec-Fetch-Site": "cross-site" }).status, 403);
+  assert.equal(agent({ "Sec-Fetch-Site": "same-origin" }), null);
+  assert.equal(
+    agent(
+      { Origin: "https://evil.example" },
+      "http://localhost:5173/api/customers"
+    ),
+    null,
+    "API reads are left to the API's own check"
   );
 });
 

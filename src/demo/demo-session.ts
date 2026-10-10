@@ -12,8 +12,9 @@ import { DEMO_SQL } from "./sql";
 
 /**
  * One instance coordinates the hosted demo. Decisions use synchronous storage,
- * and a reset blocks every other request until the fresh data is in place, so
- * concurrent first requests reseed once and never read half-reset data.
+ * and a reset blocks admission of every other request until the fresh data is
+ * in place, so concurrent first requests reseed once and never read half-reset
+ * data. Requests admitted before a reset are not fenced (see docs/deploy.md).
  */
 export class DemoSession extends DurableObject<Env> {
   private load(): DemoState {

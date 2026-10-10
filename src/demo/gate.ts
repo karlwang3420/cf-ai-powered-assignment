@@ -1,4 +1,7 @@
-import { PROCESSOR_WEBHOOK_PATH } from "../payments/protocol.ts";
+import {
+  PROCESSOR_CALLBACK_ORIGIN,
+  PROCESSOR_WEBHOOK_PATH
+} from "../payments/protocol.ts";
 import { accessSession, verifyAccessJwt } from "./access.ts";
 import type { DemoSession } from "./demo-session";
 import type { DemoStatus } from "./session.ts";
@@ -28,11 +31,16 @@ export async function admitDemoRequest(
 ): Promise<Response | DemoStatus | null> {
   const teamDomain = env.DEMO_ACCESS_TEAM_DOMAIN;
   const aud = env.DEMO_ACCESS_AUD;
-  const { hostname, pathname } = new URL(request.url);
+  const { hostname, origin, pathname } = new URL(request.url);
   if (!pathname.startsWith("/api/") && !pathname.startsWith("/agents/"))
     return null;
-  // The processor's HMAC-signed callback arrives over the service binding.
-  if (request.method === "POST" && pathname === PROCESSOR_WEBHOOK_PATH)
+  // The processor's HMAC-signed callback arrives over the service binding,
+  // under an internal hostname; the same path from the Internet needs Access.
+  if (
+    request.method === "POST" &&
+    pathname === PROCESSOR_WEBHOOK_PATH &&
+    origin === PROCESSOR_CALLBACK_ORIGIN
+  )
     return null;
   if (!teamDomain && !aud)
     return LOOPBACK.has(hostname)

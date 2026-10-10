@@ -21,6 +21,7 @@ import {
 
 import type { DemoEnv } from "./demo/gate.ts";
 import type { DemoStatus } from "./demo/session.ts";
+import { isCrossSite } from "./origin.ts";
 import { handlePaymentApi } from "./payments/api.ts";
 import { paymentLog, type PaymentEnv } from "./payments/service.ts";
 
@@ -121,13 +122,10 @@ export async function handleApi(
   // The exact processor callback authenticates its raw body with HMAC instead.
   const webhook =
     request.method === "POST" && url.pathname === "/api/payments/webhook";
-  const origin = request.headers.get("Origin");
   if (
     !webhook &&
     !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
-    ((origin !== null && origin !== url.origin) ||
-      (origin === null &&
-        request.headers.get("Sec-Fetch-Site") === "cross-site"))
+    isCrossSite(request)
   ) {
     return error(403, "forbidden", "Cross-origin mutations are not allowed");
   }

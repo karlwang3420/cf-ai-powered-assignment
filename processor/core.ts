@@ -1,5 +1,6 @@
 import {
   isProcessorAuthorized,
+  PROCESSOR_CALLBACK_ORIGIN,
   PROCESSOR_WEBHOOK_PATH,
   signProcessorWebhook
 } from "../src/payments/protocol.ts";
@@ -655,7 +656,7 @@ export class Processor {
           Math.floor(this.now() / 1000)
         );
         const response = await this.options.merchant.fetch(
-          new Request(`https://merchant.internal${PROCESSOR_WEBHOOK_PATH}`, {
+          new Request(`${PROCESSOR_CALLBACK_ORIGIN}${PROCESSOR_WEBHOOK_PATH}`, {
             method: "POST",
             headers: { "content-type": "application/json", ...signature },
             body: row.raw_body,
