@@ -331,10 +331,10 @@ Validate:
   balanced ledger, retained unknown reservation and unchanged attempt budget.
   The runtime companion test covers actual outage backoff and automatic
   InvoiceWorkflow collection. Tests never reset user `.wrangler` state.
-- **Explicit integration fixtures:** the late case delays only a real pending
-  processor record's resolution timestamp in a stopped fresh test store; normal
-  alarm/status/signing/delivery then resolve it. The test observes needs-review
-  and the ended original run before late success. Full-credit testing uses a
+- **Explicit integration fixtures:** the late case uses the never-resolving
+  pending preset and settles it only after the test observes needs-review and
+  the ended original run; normal signing/delivery then posts the late success.
+  Full-credit testing uses a
   harness-only Vite transform to call unchanged `issueCredit` on the live bound
   D1, preserving atomic batch semantics without a production mutation endpoint
   or AI call. See [local testing](local-testing.md) for exact isolation details.

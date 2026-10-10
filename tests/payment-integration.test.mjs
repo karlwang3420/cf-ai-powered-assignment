@@ -6,28 +6,12 @@ import { promisify } from "node:util";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createRequire } from "node:module";
-import { DatabaseSync } from "node:sqlite";
-import { build } from "esbuild";
 import { createServer } from "vite";
 import { Miniflare as StoreMiniflare } from "miniflare";
 import { applyMigration, invoice } from "./helpers/d1.mjs";
 import { checkPaymentLayout } from "./helpers/payment-layout.mjs";
-import {
-  claimCollection,
-  preparePaymentAttempt
-} from "../src/billing/payments.ts";
-import { chargePayload } from "../src/payments/service.ts";
-import {
-  DEMO_PROCESSOR_TOKEN,
-  DEMO_WEBHOOK_SECRET
-} from "../src/payments/protocol.ts";
 
 const exec = promisify(execFile);
-const requirePlugin = createRequire(
-  import.meta.resolve("@cloudflare/vite-plugin")
-);
-const { Miniflare } = requirePlugin("miniflare");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function eventually(read, accepts, timeout = 60_000) {
   const end = Date.now() + timeout;
@@ -38,108 +22,6 @@ async function eventually(read, accepts, timeout = 60_000) {
     await sleep(200);
   } while (Date.now() < end);
   assert.fail(`Integration condition timed out: ${JSON.stringify(value)}`);
-}
-async function files(directory) {
-  const found = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const name = path.join(directory, entry.name);
-    if (entry.isDirectory()) found.push(...(await files(name)));
-    else found.push(name);
-  }
-  return found;
-}
-
-// Fixture-only delay of a real pending charge. No production force-outcome endpoint,
-// immutable payload changes or fake webhook. payment-test mode runs demo waits at
-// PAYMENT_TIME_SCALE 0.2 (6s pending checks, 6s card wait, 0.6/1.2/1.8s dunning).
-async function seedLateProcessor(directory, attempt) {
-  const script = (
-    await build({
-      entryPoints: ["processor/worker.ts"],
-      bundle: true,
-      write: false,
-      format: "esm",
-      platform: "browser",
-      external: ["cloudflare:workers"],
-      logLevel: "silent"
-    })
-  ).outputFiles[0].text;
-  const mf = new Miniflare({
-    resourcePersistencePath: path.join(directory, "v3"),
-    workers: [
-      {
-        name: "mock-payment-processor",
-        modules: true,
-        script,
-        compatibilityDate: "2026-06-11",
-        bindings: {
-          PROCESSOR_TOKEN: DEMO_PROCESSOR_TOKEN,
-          PROCESSOR_WEBHOOK_SECRET: DEMO_WEBHOOK_SECRET
-        },
-        durableObjects: {
-          PROCESSOR_STATE: { className: "ProcessorState", useSQLite: true }
-        }
-      }
-    ]
-  });
-  try {
-    const call = (route, body, method = "POST") =>
-      mf.dispatchFetch(`https://processor.test${route}`, {
-        method,
-        headers: {
-          authorization: `Bearer ${DEMO_PROCESSOR_TOKEN}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(body)
-      });
-    assert.equal(
-      (
-        await call(
-          "/demo/scenarios",
-          { invoiceId: attempt.invoiceId, scenarios: ["pending"] },
-          "PUT"
-        )
-      ).status,
-      200
-    );
-    const result = await (
-      await call("/charges", chargePayload(attempt))
-    ).json();
-    assert.equal(result.charge.status, "pending");
-  } finally {
-    await mf.dispose();
-  }
-  const sqlite = (await files(directory))
-    .filter((f) => f.endsWith(".sqlite") && f.includes("ProcessorState"))
-    .filter((f) => {
-      const candidate = new DatabaseSync(f, { readOnly: true });
-      try {
-        return Boolean(
-          candidate
-            .prepare(
-              "SELECT name FROM sqlite_master WHERE name = 'processor_keys'"
-            )
-            .get()
-        );
-      } finally {
-        candidate.close();
-      }
-    });
-  assert.equal(sqlite.length, 1);
-  const db = new DatabaseSync(sqlite[0]);
-  try {
-    assert.equal(
-      db
-        .prepare(
-          "UPDATE processor_keys SET resolve_at = ? WHERE idempotency_key = ? AND scenario = 'pending'"
-        )
-        // Resolve after Vite boot plus three scaled 6s checks reach needs_review.
-        .run(Date.now() + 60_000, attempt.idempotencyKey).changes,
-      1
-    );
-  } finally {
-    db.close();
-  }
 }
 
 test(
@@ -192,12 +74,8 @@ test(
         .run();
       invoices[name] = await invoice(db, `test_${name}`, "2026-09");
     }
-    const owner = await claimCollection(db, invoices.late.id, 0);
-    const prepared = await preparePaymentAttempt(db, owner);
-    assert.equal(prepared.kind, "attempt");
     await seed.dispose();
     seed = undefined;
-    await seedLateProcessor(directory, prepared.attempt);
     server = await createServer({
       configFile: path.resolve("vite.config.ts"),
       mode: "payment-test",
@@ -275,12 +153,15 @@ test(
       lost_webhook: ["lost_webhook"],
       duplicate_webhook: ["duplicate_webhook"],
       pending: ["pending"],
+      // Stays pending until the test settles it, after the run gives up
+      late: ["unresolved_pending"],
       credit: ["hard_decline"]
     };
     for (const [name, queue] of Object.entries(scenarios))
       await call(route(name, "/scenarios"), "PUT", { scenarios: queue });
-    for (const name of names) await call(route(name, "/collect"), "POST");
-    await Promise.all([
+    // Watch the card waits before collecting: the waits are only seconds long,
+    // and under load the remaining collects can outlast them.
+    const cardWaits = Promise.all([
       (async () => {
         const hard = await eventually(
           () => read("hard"),
@@ -305,6 +186,10 @@ test(
         assert.equal(result.credit.invoiceId, credit.invoiceId);
       })()
     ]);
+    // Awaited below; this only keeps an early failure from going unhandled.
+    cardWaits.catch(() => {});
+    for (const name of names) await call(route(name, "/collect"), "POST");
+    await cardWaits;
     for (const name of names.filter((n) => n !== "late")) await complete(name);
     for (const name of [
       "success",
@@ -399,6 +284,8 @@ test(
       (error) => error.code === 1 && error.stdout.includes('"unresolved"')
     );
     assert.equal((await read("late")).creditableCents, 0);
+    // The processor decides only now; its signed webhook brings the success
+    await call(route("late", "/settle"), "POST", { outcome: "succeeded" });
     const late = await eventually(
       () => read("late"),
       (p) => p.status === "paid",

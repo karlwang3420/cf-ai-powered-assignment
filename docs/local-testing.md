@@ -88,15 +88,15 @@ balanced transactions, preserved reservations and real bidirectional bindings.
 type matching, timeout exceptions, actual outage step retries and automatic
 invoice-to-collection startup.
 
-Two explicit **test-only fixtures** avoid adding unsafe production controls:
+The late-success case uses the `unresolved_pending` preset, which never
+resolves by itself. The test must observe needs-review, reserved money and an
+ended Workflow before it settles the charge (**Settle pending charge**); the
+processor's normal signed callback then posts the late success. It does not
+forge a success webhook or force a terminal outcome, and it does not depend on
+how fast the machine reaches needs-review.
 
-- A real processor pending charge is created in a fresh isolated processor,
-  stopped, and its `resolve_at` delayed 140 seconds before Vite starts. Payload,
-  key and payment ID stay unchanged. The test must observe needs-review,
-  reserved money and an ended Workflow before its real alarm/signed callback
-  posts late success. It does not forge a success webhook or force a terminal
-  outcome. The normal `unresolved_pending` preset never resolves by itself; use
-  **Settle pending charge** to have the processor decide it.
+One explicit **test-only fixture** avoids adding an unsafe production control:
+
 - A Vite transform local to the harness calls unchanged `issueCredit(env.DB)`
   with one fixed approved fixture while the real Workflow waits for a card.
   It exists only in the test-created server, not normal dev/build. This retains
