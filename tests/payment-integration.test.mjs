@@ -122,6 +122,16 @@ test(
       assert.ok(response.ok, `${response.status} ${route}: ${text}`);
       return JSON.parse(text);
     };
+    // Mock processor control on the invoice's latest committed charge
+    const latest = async (name) =>
+      (await call(route(name, "/processor"))).requests.find((r) => r.charge);
+    const processor = async (name, action, outcome) => {
+      const { charge } = await latest(name);
+      return call(route(name, `/processor/${action}`), "POST", {
+        processorPaymentId: charge.processorPaymentId,
+        ...(outcome ? { outcome } : {})
+      });
+    };
     const route = (name, suffix = "") =>
       `/payments/${invoices[name].id}${suffix}`;
     const read = (name) => call(route(name));
@@ -245,6 +255,50 @@ test(
       (await call(route("exhausted", "/processor"))).requests.length,
       4
     );
+    // Resume never passes the automatic limit; an admin retry adds one attempt
+    await call(route("exhausted", "/scenarios"), "PUT", {
+      scenarios: ["soft_decline"]
+    });
+    const manual = await call(route("exhausted", "/retry"), "POST");
+    assert.equal(manual.started, true);
+    await eventually(
+      () => call(route("exhausted", "/run")),
+      (r) => r.id === manual.id && r.status === "complete",
+      150_000
+    );
+    const declinedAgain = await read("exhausted");
+    assert.deepEqual(
+      [
+        declinedAgain.status,
+        declinedAgain.attemptsUsed,
+        declinedAgain.attemptLimit
+      ],
+      ["past_due", 5, 5]
+    );
+    // The processor turns that decline into a late success; its signed
+    // webhook posts the payment once, with no new charge
+    assert.deepEqual((await latest("exhausted")).actions, [
+      "succeeded",
+      "notify"
+    ]);
+    await processor("exhausted", "decide", "succeeded");
+    const lateSuccess = await eventually(
+      () => read("exhausted"),
+      (p) => p.status === "paid",
+      60_000
+    );
+    assert.deepEqual(
+      [
+        lateSuccess.paidCents,
+        lateSuccess.attemptsUsed,
+        lateSuccess.hasConflict
+      ],
+      [invoices.exhausted.totalCents, 5, 0]
+    );
+    assert.equal(
+      (await call(route("exhausted", "/processor"))).requests.length,
+      5
+    );
     const credited = await read("credit");
     assert.equal(credited.status, "settled");
     assert.equal(credited.creditedCents, 500);
@@ -253,6 +307,22 @@ test(
     assert.equal(
       (await call(route("lost_webhook", "/processor"))).outbox[0].state,
       "dropped"
+    );
+    // Notify sends the dropped success as a new event; it changes no money
+    const resent = await processor("lost_webhook", "notify");
+    await eventually(
+      () => call(route("lost_webhook", "/processor")),
+      (p) =>
+        p.outbox.find((e) => e.event.eventId === resent.eventId)?.state ===
+        "delivered"
+    );
+    const lostWebhook = await read("lost_webhook");
+    assert.equal(lostWebhook.paidCents, invoices.lost_webhook.totalCents);
+    assert.ok(
+      lostWebhook.timeline.some(
+        (e) =>
+          e.kind === "webhook_received" && e.message.includes(resent.eventId)
+      )
     );
     const duplicate = await eventually(
       () => call(route("duplicate_webhook", "/processor")),
@@ -288,7 +358,7 @@ test(
     );
     assert.equal((await read("late")).creditableCents, 0);
     // The processor decides only now; its signed webhook brings the success
-    await call(route("late", "/settle"), "POST", { outcome: "succeeded" });
+    await processor("late", "decide", "succeeded");
     const late = await eventually(
       () => read("late"),
       (p) => p.status === "paid",

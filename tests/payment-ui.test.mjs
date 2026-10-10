@@ -3,6 +3,8 @@ import test from "node:test";
 import { api } from "../src/client-api.ts";
 import {
   canCollectPayment,
+  canRetryPayment,
+  needsNewerCard,
   paymentNeedsAttention,
   paymentNextStep,
   paymentPollDelay,
@@ -72,8 +74,31 @@ test("past-due guidance distinguishes a card timeout from exhausted attempts", (
   );
   assert.equal(
     paymentNextStep({ ...timeout, attemptsUsed: 4, attemptsRemaining: 0 }),
-    "Out of attempts · balance due"
+    "Automatic attempts used · retry manually"
   );
+});
+
+test("manual retry is offered only once the automatic attempts are used and nothing is in flight", () => {
+  const exhausted = {
+    ...collection,
+    status: "past_due",
+    attemptsUsed: 4,
+    attemptsRemaining: 0,
+    methodVersion: 1
+  };
+  assert.equal(canRetryPayment(exhausted), true);
+  assert.equal(canCollectPayment(exhausted), false);
+  for (const patch of [
+    { attemptsRemaining: 1 },
+    { ownerActive: 1 },
+    { reservedCents: 500 },
+    { hasConflict: 1 },
+    { balanceCents: 0 }
+  ])
+    assert.equal(canRetryPayment({ ...exhausted, ...patch }), false);
+  const hard = { attempts: [{ declineType: "hard", methodVersion: 1 }] };
+  assert.equal(needsNewerCard(exhausted, hard), true);
+  assert.equal(needsNewerCard({ ...exhausted, methodVersion: 2 }, hard), false);
 });
 
 test("payment polling fences stale customer success/errors and never overlaps reads", async (t) => {
@@ -220,7 +245,9 @@ test("payment assistant is read-only, customer scoped, and uses reserved/paid cr
   assert.equal(acme.issueCredit.needsApproval, true);
   assert.deepEqual(
     Object.keys(acme).filter((name) =>
-      /collect|reconcile|updatePayment|scenario/i.test(name)
+      /collect|reconcile|updatePayment|scenario|retry|decide|notify|deliver/i.test(
+        name
+      )
     ),
     []
   );

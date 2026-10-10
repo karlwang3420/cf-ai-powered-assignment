@@ -1,0 +1,10 @@
+-- A decline may later turn into a success (the mock's Settle control, or a
+-- processor that reports it late). Accept it only for the invoice's latest
+-- attempt, while no conflict is recorded and the amount due still covers the
+-- charge, so it can never pay twice. Every other terminal change stays blocked.
+DROP TRIGGER payment_attempt_payload_immutable;
+CREATE TRIGGER payment_attempt_payload_immutable BEFORE UPDATE ON payment_attempts WHEN NEW.id <> OLD.id OR NEW.invoice_id <> OLD.invoice_id OR NEW.attempt_number <> OLD.attempt_number OR NEW.generation <> OLD.generation OR NEW.amount_cents <> OLD.amount_cents OR NEW.currency <> OLD.currency OR NEW.method_version <> OLD.method_version OR NEW.idempotency_key <> OLD.idempotency_key OR NEW.created_at <> OLD.created_at OR (OLD.processor_payment_id IS NOT NULL AND NEW.processor_payment_id IS NOT OLD.processor_payment_id) OR (OLD.state IN ('succeeded', 'declined') AND (NEW.state <> OLD.state OR NEW.decline_type IS NOT OLD.decline_type) AND NOT (OLD.state = 'declined' AND NEW.state = 'succeeded' AND NEW.decline_type IS NULL AND OLD.conflicted = 0 AND NEW.conflicted = 0 AND EXISTS (SELECT 1 FROM payment_collections WHERE invoice_id = OLD.invoice_id AND attempts_used = OLD.attempt_number AND has_conflict = 0) AND (SELECT total_cents - credited_cents - paid_cents - reserved_cents FROM payment_balances WHERE invoice_id = OLD.invoice_id) >= OLD.amount_cents)) BEGIN SELECT RAISE(ABORT, 'payment attempt payload and terminal outcomes are immutable'); END;
+
+-- The declined attempt's released reservation becomes its payment's conversion.
+DROP TRIGGER payment_reservation_immutable;
+CREATE TRIGGER payment_reservation_immutable BEFORE UPDATE ON payment_reservations WHEN NEW.attempt_id <> OLD.attempt_id OR NEW.invoice_id <> OLD.invoice_id OR NEW.amount_cents <> OLD.amount_cents OR NEW.created_at <> OLD.created_at OR (OLD.status <> 'reserved' AND NOT (OLD.status = 'released' AND NEW.status = 'converted' AND EXISTS (SELECT 1 FROM payments WHERE attempt_id = OLD.attempt_id))) BEGIN SELECT RAISE(ABORT, 'payment reservation is immutable after resolution'); END;

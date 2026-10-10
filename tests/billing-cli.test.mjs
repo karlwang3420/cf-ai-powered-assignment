@@ -105,6 +105,7 @@ test("payment CLI uses running API, encodes IDs, makes resume explicit and fails
   await cli("collect", "invoice/a", url);
   await cli("reconcile-payments", "invoice/a", url);
   await cli("reconcile-payments", "invoice/a", "--resume", url);
+  await cli("reset-demo", url);
   assert.deepEqual(
     calls.map((c) => [c.method, c.url]),
     [
@@ -114,7 +115,8 @@ test("payment CLI uses running API, encodes IDs, makes resume explicit and fails
       ["GET", "/api/payments/invoice%2Fa/processor"],
       ["POST", "/api/payments/invoice%2Fa/collect"],
       ["POST", "/api/payments/reconcile"],
-      ["POST", "/api/payments/reconcile"]
+      ["POST", "/api/payments/reconcile"],
+      ["POST", "/api/demo/reset"]
     ]
   );
   assert.deepEqual(calls[5].body, { invoiceId: "invoice/a", resume: false });

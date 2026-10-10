@@ -152,7 +152,14 @@ export function AdminPage({ customers }: { customers: CustomerSummary[] }) {
             RUN INVOICE
           </Text>
           {customers.length > 0 && (
-            <InvoiceRunner customers={customers} onFinished={reload} />
+            <InvoiceRunner
+              customers={customers}
+              onFinished={(invoiceId) => {
+                reload();
+                // Open it so a mock outcome can be chosen before Collect
+                if (invoiceId) setSelected(invoiceId);
+              }}
+            />
           )}
         </section>
 

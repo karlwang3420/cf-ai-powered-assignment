@@ -4,6 +4,7 @@ import {
   claimCollection,
   debugResetPayment,
   getPaymentCollection,
+  grantManualRetry,
   listPaymentCollections,
   listPaymentInbox,
   markPaymentWebhookNotified,
@@ -385,6 +386,23 @@ export async function startCollection(env: PaymentEnv, invoiceId: string) {
     };
   }
   throw new BillingError("conflict", "collection changed; reload and retry");
+}
+
+/**
+ * Admin retry. While automatic attempts remain this is plain collection;
+ * once they are used it first allows exactly one manual attempt.
+ */
+export async function retryCollection(env: PaymentEnv, invoiceId: string) {
+  const c = await getPaymentCollection(env.DB, invoiceId);
+  if (c.attemptsRemaining === 0) {
+    await grantManualRetry(env.DB, invoiceId);
+    paymentLog(
+      "payment_manual_retry",
+      { invoiceId, workflowInstanceId: c.workflowId },
+      { attemptNumber: c.attemptsUsed + 1 }
+    );
+  }
+  return startCollection(env, invoiceId);
 }
 
 export async function reconcilePaymentCollections(

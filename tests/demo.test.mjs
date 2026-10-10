@@ -78,10 +78,52 @@ async function paidInvoice(db) {
 }
 
 test("the bundled reset SQL is every migration, in order, then the seed", () => {
-  const migrations = readdirSync(new URL("migrations/", root))
-    .sort()
-    .map((name) => `migrations/${name}`);
-  assert.deepEqual(bundled, [...migrations, "seed/demo.sql"]);
+  const files = readdirSync(new URL("migrations/", root)).sort();
+  assert.deepEqual(bundled, [
+    ...files.map((name) => `migrations/${name}`),
+    "seed/demo.sql"
+  ]);
+  // The names a rebuild records as applied
+  assert.deepEqual(
+    [...read("src/demo/sql.ts").matchAll(/\["(\d{4}_[^"]+\.sql)",/g)].map(
+      (m) => m[1]
+    ),
+    files
+  );
+});
+
+test("a rebuild records its migrations where Wrangler tracks them, so setup skips them", async (t) => {
+  const names = readdirSync(new URL("migrations/", root)).sort();
+  const local = await database(t);
+  // Wrangler's own table, as `npm run db:setup` leaves it before 0005
+  await local
+    .prepare(
+      "CREATE TABLE d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)"
+    )
+    .run();
+  for (const name of names.slice(0, 4))
+    await local
+      .prepare("INSERT INTO d1_migrations (name) VALUES (?)")
+      .bind(name)
+      .run();
+  await rebuildDatabase(local, scripts(), names);
+  const applied = async () =>
+    (
+      await local.prepare("SELECT name FROM d1_migrations ORDER BY id").all()
+    ).results.map((r) => r.name);
+  assert.deepEqual(await applied(), names);
+  await rebuildDatabase(local, scripts(), names);
+  assert.deepEqual(await applied(), names, "recorded once");
+
+  // The hosted database has no such table, and gets none
+  const hosted = await database(t);
+  await rebuildDatabase(hosted, scripts(), names);
+  assert.equal(
+    await hosted
+      .prepare("SELECT name FROM sqlite_master WHERE name = 'd1_migrations'")
+      .first(),
+    null
+  );
 });
 
 test("rebuild returns a used database, immutable payments included, to the seed", async (t) => {
@@ -439,7 +481,7 @@ test("deploys put the processor up before the app that binds to it", () => {
   ]);
 });
 
-test("the demo API reports status and resets only in hosted demo mode", async (t) => {
+test("the demo API reports status and resets, hosted and in local dev", async (t) => {
   const db = await database(t);
   const resets = [];
   const env = {
@@ -458,14 +500,10 @@ test("the demo API reports status and resets only in hosted demo mode", async (t
     handleApi(request(path, init), env, NOW, demo);
 
   assert.deepEqual(await (await call("/api/demo", {}, null)).json(), {
-    enabled: false
+    enabled: false,
+    resettable: true
   });
   assert.deepEqual(await (await call("/api/demo")).json(), status);
-  assert.equal(
-    (await call("/api/demo/reset", { method: "POST" }, null)).status,
-    404,
-    "local dev has no demo reset"
-  );
   assert.equal(
     (
       await call("/api/demo/reset", {
@@ -491,6 +529,34 @@ test("the demo API reports status and resets only in hosted demo mode", async (t
   const once = await call("/api/demo/reset", { method: "POST" }, admittedReset);
   assert.deepEqual(await once.json(), admittedReset);
   assert.deepEqual(resets, [1]);
+
+  // Local dev (no demo status; the gate serves only loopback) resets too
+  assert.deepEqual(
+    await (await call("/api/demo/reset", { method: "POST" }, null)).json(),
+    { enabled: false, resettable: true, reset: true }
+  );
+  assert.deepEqual(resets, [1, 1]);
+  assert.equal(
+    (
+      await call(
+        "/api/demo/reset",
+        { method: "POST", headers: { Origin: "https://evil.example" } },
+        null
+      )
+    ).status,
+    403
+  );
+  assert.deepEqual(resets, [1, 1]);
+  // Without the coordinating Durable Object there is nothing to reset with
+  delete env.DEMO_SESSION;
+  assert.deepEqual(await (await call("/api/demo", {}, null)).json(), {
+    enabled: false,
+    resettable: false
+  });
+  assert.equal(
+    (await call("/api/demo/reset", { method: "POST" }, null)).status,
+    404
+  );
 });
 
 /**

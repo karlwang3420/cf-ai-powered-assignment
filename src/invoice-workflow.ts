@@ -11,8 +11,6 @@ import {
   reconcile
 } from "./billing/store.ts";
 
-import { startCollection } from "./payments/service.ts";
-
 export type InvoiceRunParams = { customerId: string; month: string };
 
 export type InvoiceRunResult = {
@@ -44,6 +42,8 @@ async function failFast<T>(fn: () => Promise<T>): Promise<T> {
  * Invoices one customer for one month. Each step is retried on failure and
  * its result is persisted, so a crashed run resumes where it stopped. The
  * billing operations are idempotent, so a step that runs twice is harmless.
+ * Payment collection is a separate admin action, so a mock processor outcome
+ * can be chosen for the finalized invoice before anything is charged.
  */
 export class InvoiceWorkflow extends WorkflowEntrypoint<Env, InvoiceRunParams> {
   async run(
@@ -71,10 +71,6 @@ export class InvoiceWorkflow extends WorkflowEntrypoint<Env, InvoiceRunParams> {
         issues
       );
     }
-    await step.do("start payment collection", RETRIES, async () => {
-      const result = await startCollection(this.env, invoice.id);
-      return { id: result.id };
-    });
     return {
       invoiceId: invoice.id,
       totalCents: invoice.totalCents,

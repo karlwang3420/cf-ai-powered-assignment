@@ -72,14 +72,15 @@ async function stopRun(env: PaymentEnv, id: string) {
 }
 
 /**
- * Returns the hosted demo to its seed: stops collection runs, clears the mock
+ * Returns the demo (hosted, or local dev) to its seed: stops collection runs, clears the mock
  * processor, rebuilds D1 and deletes each customer's chat. The processor is
  * cleared before D1 so no old charge can replay or call back into fresh data.
  */
 export async function resetDemo(
   env: PaymentEnv,
   scripts: string[],
-  clearChat: (customerId: string) => Promise<void>
+  clearChat: (customerId: string) => Promise<void>,
+  migrations: string[] = []
 ) {
   const runs = await ids(
     env.DB,
@@ -93,7 +94,7 @@ export async function resetDemo(
       `processor reset failed (${processor.status}); nothing was changed`
     );
   const before = await ids(env.DB, "SELECT id FROM customers");
-  await rebuildDatabase(env.DB, scripts);
+  await rebuildDatabase(env.DB, scripts, migrations);
   const customers = [
     ...new Set([...before, ...(await ids(env.DB, "SELECT id FROM customers"))])
   ];

@@ -6,10 +6,23 @@ import {
 } from "../src/payments/protocol.ts";
 import type {
   ChargeRequest,
+  ChargeState,
+  DeliveryState,
   ProcessorCharge,
+  ProcessorInspection,
   ProcessorScenario,
   ProcessorWebhook
 } from "../src/payments/protocol.ts";
+import {
+  CHARGE_TRANSITIONS,
+  SCENARIO_PLANS,
+  SCENARIOS,
+  chargeActions,
+  chargeState,
+  deliveryActions,
+  withState,
+  type ScenarioPlan
+} from "./model.ts";
 
 /** Structural adapter keeps the business logic runnable against fresh Node SQLite. */
 export interface ProcessorStorage {
@@ -46,7 +59,7 @@ type OutboxRow = {
   invoice_id: string;
   payment_id: string;
   raw_body: string;
-  state: "queued" | "delivered" | "dropped" | "exhausted";
+  state: DeliveryState;
   attempts: number;
   copies_remaining: number;
   due_at: number;
@@ -56,19 +69,6 @@ type OutboxRow = {
 export const PENDING_DELAY_MS = 2_000;
 export const MAX_DELIVERY_ATTEMPTS = 8;
 const DELIVERY_LEASE_MS = 30_000;
-const SETTLE_OUTCOMES = ["succeeded", "soft_decline", "hard_decline"] as const;
-type SettleOutcome = (typeof SETTLE_OUTCOMES)[number];
-const SCENARIOS: ProcessorScenario[] = [
-  "success",
-  "soft_decline",
-  "hard_decline",
-  "outage",
-  "lost_response",
-  "pending",
-  "lost_webhook",
-  "duplicate_webhook",
-  "unresolved_pending"
-];
 class HttpError extends Error {
   readonly status: number;
   readonly code: string;
@@ -226,7 +226,11 @@ export class Processor {
       key
     )[0];
   }
-  private enqueue(charge: ProcessorCharge, scenario: ProcessorScenario) {
+  /** One delivery of a new event, unless the scenario shapes this first webhook. */
+  private enqueue(
+    charge: ProcessorCharge,
+    webhook?: ScenarioPlan["firstWebhook"]
+  ) {
     const event: ProcessorWebhook = {
       eventId: `evt_${crypto.randomUUID()}`,
       type: "payment.updated",
@@ -241,10 +245,11 @@ export class Processor {
       charge.invoiceId,
       charge.processorPaymentId,
       JSON.stringify(event),
-      scenario === "lost_webhook" ? "dropped" : "queued",
-      scenario === "duplicate_webhook" ? 2 : 1,
+      webhook === "dropped" ? "dropped" : "queued",
+      webhook === "twice" ? 2 : 1,
       this.now()
     );
+    return event;
   }
   private consumeScenario(invoiceId: string): ProcessorScenario {
     const row = this.rows<{ queue_json: string }>(
@@ -310,7 +315,7 @@ export class Processor {
           this.now()
         );
         existing = this.key(request.idempotencyKey)!;
-        if (scenario === "outage") {
+        if (SCENARIO_PLANS[scenario].outageFirst) {
           return json(
             {
               error: {
@@ -323,36 +328,22 @@ export class Processor {
           );
         }
       }
-      const scenario = existing.scenario;
-      const base = {
-        ...request,
-        processorPaymentId: `pay_${crypto.randomUUID()}`
-      };
-      const charge: ProcessorCharge =
-        scenario === "soft_decline" || scenario === "hard_decline"
-          ? {
-              ...base,
-              status: "declined",
-              declineType: scenario === "soft_decline" ? "soft" : "hard"
-            }
-          : {
-              ...base,
-              status:
-                scenario === "pending" || scenario === "unresolved_pending"
-                  ? "pending"
-                  : "succeeded"
-            };
+      const plan = SCENARIO_PLANS[existing.scenario];
+      const charge = withState(
+        { ...request, processorPaymentId: `pay_${crypto.randomUUID()}` },
+        plan.state
+      );
       this.storage.sql.exec(
         `UPDATE processor_keys SET payment_id = ?, outcome_json = ?, resolve_at = ?
         WHERE idempotency_key = ?`,
         charge.processorPaymentId,
         JSON.stringify(charge),
-        scenario === "pending" ? this.now() + PENDING_DELAY_MS : null,
+        plan.autoSucceed ? this.now() + PENDING_DELAY_MS : null,
         request.idempotencyKey
       );
-      this.enqueue(charge, scenario);
-      if (scenario === "lost_response") {
-        // Commit success and its outbox atomically, but withhold the charge response.
+      this.enqueue(charge, plan.firstWebhook);
+      if (plan.loseResponse) {
+        // Commit the charge and its outbox atomically, but withhold the response.
         return json(
           {
             error: {
@@ -366,6 +357,37 @@ export class Processor {
       return json({ charge, replayed: false }, 201);
     });
   }
+  /**
+   * The only way a committed charge changes state: along CHARGE_TRANSITIONS,
+   * with a new webhook. Call inside a transaction.
+   */
+  private transition(row: KeyRow, to: ChargeState) {
+    const charge: ProcessorCharge = JSON.parse(row.outcome_json!);
+    const from = chargeState(charge);
+    if (!CHARGE_TRANSITIONS[from].includes(to))
+      throw new HttpError(
+        409,
+        "invalid_transition",
+        `A ${from} charge cannot become ${to}`
+      );
+    const next = withState(charge, to);
+    this.storage.sql.exec(
+      "UPDATE processor_keys SET outcome_json = ?, resolve_at = NULL WHERE idempotency_key = ?",
+      JSON.stringify(next),
+      row.idempotency_key
+    );
+    return this.enqueue(next);
+  }
+  /** One committed charge of this invoice, by payment ID. */
+  private committed(invoiceId: string, paymentId: string) {
+    const row = this.rows<KeyRow>(
+      "SELECT * FROM processor_keys WHERE invoice_id = ? AND payment_id = ?",
+      invoiceId,
+      paymentId
+    )[0];
+    if (!row) throw new HttpError(404, "not_found", "Unknown charge");
+    return row;
+  }
   /** Both alarms and status/replay observations can advance due pending outcomes. */
   private progress() {
     this.storage.transactionSync(() => {
@@ -373,18 +395,7 @@ export class Processor {
         "SELECT * FROM processor_keys WHERE resolve_at <= ? ORDER BY resolve_at LIMIT 32",
         this.now()
       );
-      for (const row of rows) {
-        const previous: ProcessorCharge = JSON.parse(row.outcome_json!);
-        if (previous.status !== "pending")
-          throw new Error("Invalid pending transition");
-        const charge: ProcessorCharge = { ...previous, status: "succeeded" };
-        this.storage.sql.exec(
-          "UPDATE processor_keys SET outcome_json = ?, resolve_at = NULL WHERE idempotency_key = ?",
-          JSON.stringify(charge),
-          row.idempotency_key
-        );
-        this.enqueue(charge, row.scenario);
-      }
+      for (const row of rows) this.transition(row, "succeeded");
     });
   }
   /** Arm before mutation/network I/O: a crash cannot strand a committed outbox row. */
@@ -474,49 +485,81 @@ export class Processor {
         );
         return json({ invoiceId, scenarios: value.scenarios });
       }
-      if (request.method === "POST" && path === "/demo/settle") {
-        // Demo control: the processor finally decides this invoice's pending
-        // charge. The merchant learns it only via the normal signed webhook
-        // or a status lookup; nothing on the merchant side is forced.
+      if (request.method === "POST" && path === "/demo/decide") {
+        // Demo control: change a charge's state, as the processor would on
+        // deciding it. The merchant learns it only via the normal signed
+        // webhook or a status lookup; nothing on the merchant side is forced.
         const value = object(await body(request));
-        fields(value, ["invoiceId", "outcome"]);
+        fields(value, ["invoiceId", "processorPaymentId", "outcome"]);
         const invoiceId = identity(value.invoiceId, "invoiceId");
-        const outcome = value.outcome;
-        if (!SETTLE_OUTCOMES.includes(outcome as SettleOutcome))
-          invalid("outcome must be succeeded, soft_decline or hard_decline");
-        await this.arm();
-        const charge = this.storage.transactionSync(() => {
-          const row = this.rows<KeyRow>(
-            `SELECT * FROM processor_keys WHERE invoice_id = ?
-            AND json_extract(outcome_json, '$.status') = 'pending'
-            ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-            invoiceId
-          )[0];
-          if (!row)
-            throw new HttpError(
-              409,
-              "not_pending",
-              "No pending charge for this invoice"
-            );
-          const previous: ProcessorCharge = JSON.parse(row.outcome_json!);
-          const next: ProcessorCharge =
-            outcome === "succeeded"
-              ? { ...previous, status: "succeeded" }
-              : {
-                  ...previous,
-                  status: "declined",
-                  declineType: outcome === "soft_decline" ? "soft" : "hard"
-                };
-          this.storage.sql.exec(
-            "UPDATE processor_keys SET outcome_json = ?, resolve_at = NULL WHERE idempotency_key = ?",
-            JSON.stringify(next),
-            row.idempotency_key
+        const paymentId = identity(
+          value.processorPaymentId,
+          "processorPaymentId"
+        );
+        const to = value.outcome as ChargeState;
+        if (typeof to !== "string" || !(to in CHARGE_TRANSITIONS))
+          invalid(
+            "outcome must be pending, succeeded, soft_decline or hard_decline"
           );
-          this.enqueue(next, row.scenario);
-          return next;
-        });
+        await this.arm();
+        const event = this.storage.transactionSync(() =>
+          this.transition(this.committed(invoiceId, paymentId), to)
+        );
         await this.schedule();
-        return json({ invoiceId, charge });
+        return json({
+          invoiceId,
+          eventId: event.eventId,
+          charge: event.charge
+        });
+      }
+      if (request.method === "POST" && path === "/demo/notify") {
+        // Demo control: a new event (new ID) for the charge's current state
+        const value = object(await body(request));
+        fields(value, ["invoiceId", "processorPaymentId"]);
+        const invoiceId = identity(value.invoiceId, "invoiceId");
+        const paymentId = identity(
+          value.processorPaymentId,
+          "processorPaymentId"
+        );
+        await this.arm();
+        const event = this.storage.transactionSync(() =>
+          this.enqueue(
+            JSON.parse(this.committed(invoiceId, paymentId).outcome_json!)
+          )
+        );
+        await this.schedule();
+        return json({
+          invoiceId,
+          eventId: event.eventId,
+          charge: event.charge
+        });
+      }
+      if (request.method === "POST" && path === "/demo/deliver") {
+        // Demo control: send a dropped or given-up event again, same event ID
+        const value = object(await body(request));
+        fields(value, ["invoiceId", "eventId"]);
+        const invoiceId = identity(value.invoiceId, "invoiceId");
+        const eventId = identity(value.eventId, "eventId");
+        await this.arm();
+        const row = this.rows<OutboxRow>(
+          "SELECT * FROM processor_outbox WHERE invoice_id = ? AND event_id = ?",
+          invoiceId,
+          eventId
+        )[0];
+        if (!row) throw new HttpError(404, "not_found", "Unknown event");
+        if (!deliveryActions(row.state).includes("deliver"))
+          throw new HttpError(
+            409,
+            "not_redeliverable",
+            `A ${row.state} event cannot be delivered again`
+          );
+        this.storage.sql.exec(
+          "UPDATE processor_outbox SET state = 'queued', attempts = 0, due_at = ?, last_error = NULL WHERE event_id = ?",
+          this.now(),
+          eventId
+        );
+        await this.schedule();
+        return json({ invoiceId, eventId, state: "queued" });
       }
       if (request.method === "POST" && path === "/demo/reset") {
         // Local debug reset: forget this invoice's keys, deliveries and queue so
@@ -571,16 +614,23 @@ export class Processor {
           "SELECT queue_json FROM processor_scenarios WHERE invoice_id = ?",
           invoiceId
         )[0];
-        return json({
+        const state: ProcessorInspection = {
           invoiceId,
           keyRetention: "indefinite",
           scenarios: queue ? JSON.parse(queue.queue_json) : [],
-          requests: plans.map((row) => ({
-            request: JSON.parse(row.request_json),
-            scenario: row.scenario,
-            charge: row.outcome_json ? JSON.parse(row.outcome_json) : null,
-            resolveAt: row.resolve_at
-          })),
+          requests: plans.map((row) => {
+            const charge: ProcessorCharge | null = row.outcome_json
+              ? JSON.parse(row.outcome_json)
+              : null;
+            return {
+              request: JSON.parse(row.request_json),
+              scenario: row.scenario,
+              charge,
+              state: charge ? chargeState(charge) : "uncommitted",
+              resolveAt: row.resolve_at,
+              actions: chargeActions(charge)
+            };
+          }),
           outbox: outbox.map((row) => ({
             event: JSON.parse(row.raw_body),
             state: row.state,
@@ -588,33 +638,11 @@ export class Processor {
             copiesRemaining: row.copies_remaining,
             dueAt: row.due_at,
             deliveredAt: row.delivered_at,
-            lastError: row.last_error
+            lastError: row.last_error,
+            actions: deliveryActions(row.state)
           }))
-        });
-      }
-      if (request.method === "POST" && path === "/demo/outbox/retry") {
-        const value = object(await body(request));
-        fields(value, ["eventId"]);
-        const eventId = identity(value.eventId, "eventId");
-        await this.arm();
-        const row = this.rows<OutboxRow>(
-          "SELECT * FROM processor_outbox WHERE event_id = ?",
-          eventId
-        )[0];
-        if (!row) throw new HttpError(404, "not_found", "Unknown event");
-        if (row.state !== "exhausted")
-          throw new HttpError(
-            409,
-            "not_exhausted",
-            "Only exhausted deliveries can be resumed"
-          );
-        this.storage.sql.exec(
-          "UPDATE processor_outbox SET state = 'queued', attempts = 0, due_at = ?, last_error = NULL WHERE event_id = ?",
-          this.now(),
-          eventId
-        );
-        await this.schedule();
-        return json({ eventId, state: "queued" });
+        };
+        return json(state);
       }
       throw new HttpError(404, "not_found", "Unknown processor endpoint");
     } catch (error) {

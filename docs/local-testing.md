@@ -42,10 +42,14 @@ stop that dev process before direct-file CLI writes, supplying the **same**
 **Reset policy:** there is no force-outcome endpoint. To return one invoice to
 unpaid, use the admin dialog's **Debug → Reset to unpaid**, which clears that
 invoice in both merchant D1 and the processor (see
-[payment workflow](payment-workflow.md#deliberate-boundaries)). To restart a whole demo, stop its
-process and allocate a **new disposable directory** using the commands above;
-this resets both merchant and processor by isolation, without deleting old
-state. Never reset just the merchant while reusing processor invoice/key IDs.
+[payment workflow](payment-workflow.md#deliberate-boundaries)). To restart the
+whole demo, click **Reset demo** in the banner or run
+`npm run billing -- reset-demo` while dev runs. It is the hosted demo's reset:
+it stops collection runs, clears the mock processor, rebuilds D1 from the
+bundled migrations and seed, records those migrations as applied for
+`db:setup`, and clears chats. To keep the old state instead, allocate a **new
+disposable directory** using the commands above. Never reset just the merchant
+while reusing processor invoice/key IDs.
 The legacy `npm run db:reset` is destructive merchant-only tooling, not a
 payment reset; do not use it on existing demo data. Standalone processor commands and its
 separate persistence are in [`processor/README.md`](../processor/README.md);
@@ -67,13 +71,13 @@ a time because several start their own Workers runtimes.
 Store/API tests use fresh D1. Runtime tests use new OS-temp persistence, real
 local Workflow primitives and actual Workers.
 The integration matrix runs success, soft decline/recovery, hard decline/card
-update, four-attempt exhaustion (including manual resume), lost response,
-missing/duplicate webhook, pending, late success after needs-review, and full
+update, four-attempt exhaustion (resume stays bounded; a manual retry then
+pays), lost response, missing/duplicate webhook (including a resent event), pending, late success after needs-review, and full
 credit during card timeout. It verifies one payment per successful invoice,
 balanced transactions, preserved reservations and real bidirectional bindings.
 `payment-workflow-runtime.test.mjs` additionally verifies early event buffering,
-type matching, timeout exceptions, actual outage step retries and automatic
-invoice-to-collection startup.
+type matching, timeout exceptions, actual outage step retries, and that an
+invoice run finalizes without starting collection.
 
 The late-success case uses the `unresolved_pending` preset, which never
 resolves by itself. The test must observe needs-review, reserved money and an
@@ -106,27 +110,22 @@ at existing demo state.
 
 ## Payment walkthrough
 
-Use an existing **finalized, uncollected** invoice, or prepare one via the CLI
-with dev stopped. CLI finalization intentionally does not start a Workflow:
+Use a **finalized, uncollected** invoice. Neither **Run invoice** in Admin nor
+CLI finalization (`npm run billing -- invoice cus_acme 2026-09`, dev stopped)
+starts collection. For isolated demos append `--persist-to="$TEST_STATE"` to the
+invoice command and use `payment-test` mode as above. The seeded Acme September
+invoice is $11.76; immutable replay returns the same invoice.
 
-```sh
-npm run billing -- invoice cus_acme 2026-09
-npm run dev
-```
-
-For isolated demos append `--persist-to="$TEST_STATE"` to the invoice command
-and use `payment-test` mode as above. The seeded Acme September invoice is
-$11.76; immutable replay returns the same invoice. In contrast, the UI's
-**Run invoice** automatically starts collection after finalization; default
-processor success may pay it before you can select a different scenario.
-
-1. Open <http://localhost:5173/admin> and click an invoice row. The dialog
-   shows status, money and actions; the customer view at `/` stays read-only.
+1. Open <http://localhost:5173/admin> and run an invoice; its dialog opens. Or
+   click an invoice row. The dialog shows status, money and actions; the
+   customer view at `/` stays read-only.
 2. In **Mock controls**, choose a preset. It is sent to the processor
-   immediately and affects future new keys only, not historical attempts.
+   immediately and affects future new keys only, not historical attempts. The
+   tab shows only the controls that apply to the current outcome (see the
+   table in the [README](../README.md#3-try-payment-failures-and-recovery)).
 3. **Collect** starts/reuses the bounded generation. It is not a
    force-retry. Inspect authoritative paid/reserved/due/creditable amounts and
-   `n/4` attempts; reserved money is still unresolved, not failed.
+   `n of 4` attempts; reserved money is still unresolved, not failed.
 4. Soft decline → success waits 3 seconds. Later slots are 6 and 9 seconds
    (production day-1/3/7 labels). Hard decline requires **Simulate card update**
    within the fixed 30-second wait. Duplicate updates cannot reset budget or
@@ -134,16 +133,28 @@ processor success may pay it before you can select a different scenario.
 5. **Reconcile** drains unapplied inbox and looks up original keys.
    **Reconcile + resume** may start a new run
    and charge the remaining balance; it never bypasses unresolved money or the
-   four-attempt limit. Read unresolved/error/conflict checks even when internal
-   invariant issues are empty.
-6. Pending normally succeeds after 2 seconds. Unresolved pending reaches
+   four automatic attempts. Read unresolved/error/conflict checks even when
+   internal invariant issues are empty.
+6. Once the four automatic attempts are used, **Collect** becomes **Retry
+   payment**. Each click allows one manual attempt (shown as `5 of 5 used · 1
+manual`), charged at once without a dunning wait; if it declines, the
+   invoice is past due again. A hard decline first needs a newer card. Nothing
+   bypasses an unresolved charge or a conflict.
+7. Pending normally succeeds after 2 seconds. Unresolved pending reaches
    needs-review after three 30-second checks and keeps its reservation. The
    admin **Needs review** / **Held** tiles include reservations and merchant unapplied
    events, not merely Workflow failures. A late result still posts after the
-   old Workflow ends: in **Mock controls**, **Settle pending charge** makes the
-   processor succeed or decline it and send its signed webhook. Succeeds moves
-   needs review to paid; a soft decline releases the hold so Collect works again.
-7. Use the **Activity** and **Debug** tabs for timeline, immutable keys, method versions, processor IDs,
+   old Workflow ends: in **Mock controls**, decide the pending charge
+   (Succeeds / Soft decline / Hard decline) and the processor sends its signed
+   webhook. Succeeds moves needs review to paid; a soft decline releases the
+   hold so Collect works again.
+8. Mock controls list every processor charge with the actions its state model
+   allows ([processor state model](../processor/README.md#state-model)). After a
+   decline, **Succeeds** is a late success: the same payment ID, posted once
+   with no new charge, or a conflict if a newer attempt or a credit makes it
+   unsafe. **Send webhook** sends a new event for the current state; a dropped
+   or given-up delivery can be delivered again with its original event ID.
+9. Use the **Activity** and **Debug** tabs for timeline, immutable keys, method versions, processor IDs,
    notices, deadlines and Workflow IDs. Continue polling financial state:
    Workflow completion alone is not payment proof.
 
@@ -168,6 +179,7 @@ npm run billing -- payment inv_cus_acme_2026-09
 npm run billing -- payment-timeline inv_cus_acme_2026-09
 npm run billing -- payment-processor inv_cus_acme_2026-09
 npm run billing -- collect inv_cus_acme_2026-09
+npm run billing -- retry inv_cus_acme_2026-09
 npm run billing -- reconcile-payments inv_cus_acme_2026-09
 npm run billing -- reconcile-payments inv_cus_acme_2026-09 --resume
 ```

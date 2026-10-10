@@ -1,6 +1,7 @@
 import type {
   CollectionStatus,
   PaymentCollection,
+  PaymentDetail,
   PaymentInboxEvent
 } from "../billing/payments";
 import { formatCents } from "../billing/pricing.ts";
@@ -70,7 +71,7 @@ export function paymentNextStep(payment: PaymentCollection): string {
       return payment.ownerActive ? "Retry scheduled" : "Ready to retry";
     case "past_due":
       return payment.attemptsRemaining === 0
-        ? "Out of attempts · balance due"
+        ? "Automatic attempts used · retry manually"
         : "Past due · update card, then reconcile + resume";
     case "open":
       return canCollectPayment(payment)
@@ -91,7 +92,34 @@ export function collectBlockedReason(
   if (payment.ownerActive) return "Collection already running";
   if (payment.status === "needs_review") return "In review";
   if (payment.status === "action_required") return "Needs a newer card";
-  return "No attempts left";
+  return "Automatic attempts used";
+}
+
+/**
+ * Admin manual retry: only once the automatic attempts are used and nothing
+ * is in flight. The server also requires a newer card after a hard decline.
+ */
+export function canRetryPayment(payment: PaymentCollection): boolean {
+  return (
+    payment.attemptsRemaining === 0 &&
+    payment.balanceCents > 0 &&
+    !payment.ownerActive &&
+    !payment.hasConflict &&
+    payment.reservedCents === 0
+  );
+}
+
+/** A hard decline blocks further charges until the card is newer than its card. */
+export function needsNewerCard(
+  payment: PaymentCollection,
+  detail: PaymentDetail | null
+): boolean {
+  return Boolean(
+    detail?.attempts.some(
+      (a) =>
+        a.declineType === "hard" && a.methodVersion >= payment.methodVersion
+    )
+  );
 }
 
 export function paymentNeedsAttention(payment: PaymentCollection): boolean {

@@ -24,7 +24,8 @@ export function InvoiceRunner({
   onFinished
 }: {
   customers: CustomerSummary[];
-  onFinished: () => void;
+  /** Called with the finalized invoice's ID when the run completes. */
+  onFinished: (invoiceId?: string) => void;
 }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id ?? "");
   const [detail, setDetail] = useState<CustomerDetail | null>(null);
@@ -78,10 +79,10 @@ export function InvoiceRunner({
           setRun({
             phase: "done",
             month,
-            message: `finalized ${total === null ? "-" : formatCents(total)}, collecting`
+            message: `finalized ${total === null ? "-" : formatCents(total)}, not collected yet`
           });
           setReloads((n) => n + 1);
-          onFinished();
+          onFinished(status.output?.invoiceId);
           return;
         }
         if (status.status === "errored" || status.status === "terminated") {

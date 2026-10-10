@@ -146,7 +146,9 @@ test("processor authenticates every endpoint and bounds demo controls/input", as
     ["/charges?idempotencyKey=absent", "GET"],
     ["/demo/inspect?invoiceId=inv_1", "GET"],
     ["/demo/scenarios", "PUT", {}],
-    ["/demo/outbox/retry", "POST", {}]
+    ["/demo/decide", "POST", {}],
+    ["/demo/notify", "POST", {}],
+    ["/demo/deliver", "POST", {}]
   ])
     assert.equal((await f.call(path, method, value, "wrong")).status, 401);
   for (const value of [
@@ -430,24 +432,26 @@ test("processor bounded delivery exhaustion remains inspectable and explicitly r
   assert.equal(f.alarmAt, null);
   f.restart();
   healthy = true;
-  assert.equal(
-    (
-      await f.call("/demo/outbox/retry", "POST", {
-        eventId: exhausted.event.eventId
-      })
-    ).status,
-    200
-  );
+  assert.deepEqual(exhausted.actions, ["deliver"]);
+  const deliver = () =>
+    f.call("/demo/deliver", "POST", {
+      invoiceId: "inv_1",
+      eventId: exhausted.event.eventId
+    });
+  assert.equal((await deliver()).status, 200);
   await f.tick();
   assert.equal((await f.inspect()).outbox[0].state, "delivered");
   assert.equal(f.deliveries.at(-1).event.eventId, exhausted.event.eventId);
+  assert.equal((await deliver()).status, 409, "a delivered event is done");
   assert.equal(
     (
-      await f.call("/demo/outbox/retry", "POST", {
+      await f.call("/demo/deliver", "POST", {
+        invoiceId: "inv_other",
         eventId: exhausted.event.eventId
       })
     ).status,
-    409
+    404,
+    "scoped to its invoice"
   );
 });
 
@@ -697,59 +701,123 @@ test("processor reset-all waits for a webhook already being sent, then sends no 
   assert.equal(f.deliveries.length, 1);
 });
 
-test("processor demo settle resolves only a pending charge through the normal signed webhook", async (t) => {
+test("processor state model: every charge changes only along its transitions, each change sends a webhook", async (t) => {
   const f = fixture(t);
-  assert.equal(
-    (
-      await f.call("/demo/settle", "POST", {
-        invoiceId: "inv_1",
-        outcome: "succeeded"
-      })
-    ).status,
-    409,
-    "nothing pending yet"
-  );
   await f.scenario(["unresolved_pending"]);
   const pending = await (await f.call("/charges", "POST", payload())).json();
-  assert.equal(pending.charge.status, "pending");
+  const id = pending.charge.processorPaymentId;
+  const decide = (outcome, processorPaymentId = id) =>
+    f.call("/demo/decide", "POST", {
+      invoiceId: "inv_1",
+      processorPaymentId,
+      outcome
+    });
+  const state = async () => {
+    const [charge] = (await f.inspect()).requests;
+    return [charge.state, charge.actions];
+  };
+  assert.deepEqual(await state(), [
+    "pending",
+    ["succeeded", "soft_decline", "hard_decline", "notify"]
+  ]);
   await f.tick();
   assert.equal(f.deliveries.length, 1, "pending webhook");
+  assert.equal((await decide("maybe")).status, 400);
+  assert.equal((await decide("succeeded", "pay_unknown")).status, 404);
   assert.equal(
     (
-      await f.call("/demo/settle", "POST", {
-        invoiceId: "inv_1",
-        outcome: "maybe"
-      })
-    ).status,
-    400
-  );
-  const settled = await (
-    await f.call("/demo/settle", "POST", {
-      invoiceId: "inv_1",
-      outcome: "soft_decline"
-    })
-  ).json();
-  assert.equal(settled.charge.status, "declined");
-  assert.equal(settled.charge.declineType, "soft");
-  assert.equal(
-    settled.charge.processorPaymentId,
-    pending.charge.processorPaymentId
-  );
-  const lookup = await (
-    await f.call("/charges?idempotencyKey=inv_1%3A1")
-  ).json();
-  assert.deepEqual(lookup.charge, settled.charge, "status lookup agrees");
-  await f.tick();
-  assert.equal(f.deliveries.length, 2);
-  assert.deepEqual(f.deliveries[1].event.charge, settled.charge);
-  assert.equal(
-    (
-      await f.call("/demo/settle", "POST", {
-        invoiceId: "inv_1",
+      await f.call("/demo/decide", "POST", {
+        invoiceId: "inv_other",
+        processorPaymentId: id,
         outcome: "succeeded"
       })
     ).status,
-    409,
-    "terminal outcomes stay immutable"
+    404,
+    "scoped to its invoice"
+  );
+
+  const declined = await (await decide("soft_decline")).json();
+  assert.deepEqual(
+    [declined.charge.status, declined.charge.declineType],
+    ["declined", "soft"]
+  );
+  assert.equal(declined.charge.processorPaymentId, id);
+  assert.deepEqual(
+    (await (await f.call("/charges?idempotencyKey=inv_1%3A1")).json()).charge,
+    declined.charge,
+    "status lookup agrees"
+  );
+  assert.deepEqual(await state(), ["soft_decline", ["succeeded", "notify"]]);
+  for (const outcome of ["pending", "soft_decline", "hard_decline"])
+    assert.equal((await decide(outcome)).status, 409, outcome);
+
+  // A decline can still become a late success; a success is final
+  const late = await (await decide("succeeded")).json();
+  assert.equal(late.charge.status, "succeeded");
+  assert.equal(late.charge.declineType, undefined);
+  assert.deepEqual(await state(), ["succeeded", ["notify"]]);
+  for (const outcome of ["pending", "succeeded", "soft_decline"])
+    assert.equal((await decide(outcome)).status, 409, outcome);
+  await f.tick();
+  assert.deepEqual(
+    f.deliveries.map((d) => d.event.charge.status),
+    ["pending", "declined", "succeeded"]
+  );
+  assert.equal(
+    new Set(f.deliveries.map((d) => d.event.eventId)).size,
+    3,
+    "one new event per change"
+  );
+});
+
+test("processor notify sends a new event for the current state; deliver sends a dropped one again", async (t) => {
+  const f = fixture(t);
+  await f.scenario(["soft_decline", "lost_webhook"]);
+  const declined = await (await f.call("/charges", "POST", payload())).json();
+  const lost = await (
+    await f.call(
+      "/charges",
+      "POST",
+      payload({ attemptId: "attempt_2", idempotencyKey: "inv_1:2" })
+    )
+  ).json();
+  await f.tick();
+  assert.equal(f.deliveries.length, 1, "the lost webhook was dropped");
+  let inspect = await f.inspect();
+  const dropped = inspect.outbox.find(
+    (o) => o.event.charge.attemptId === "attempt_2"
+  );
+  assert.deepEqual([dropped.state, dropped.actions], ["dropped", ["deliver"]]);
+  assert.deepEqual(
+    inspect.outbox.find((o) => o.event.charge.attemptId === "attempt_1")
+      .actions,
+    [],
+    "a delivered event is done"
+  );
+
+  // Deliver: the same event, finally sent
+  await f.call("/demo/deliver", "POST", {
+    invoiceId: "inv_1",
+    eventId: dropped.event.eventId
+  });
+  await f.tick();
+  assert.equal(f.deliveries.length, 2);
+  assert.equal(f.deliveries[1].event.eventId, dropped.event.eventId);
+  // Notify: a new event with the charge's current state, sent once
+  const sent = await (
+    await f.call("/demo/notify", "POST", {
+      invoiceId: "inv_1",
+      processorPaymentId: declined.charge.processorPaymentId
+    })
+  ).json();
+  assert.deepEqual(sent.charge, declined.charge);
+  await f.tick();
+  assert.equal(f.deliveries.length, 3);
+  assert.equal(f.deliveries[2].event.eventId, sent.eventId);
+  inspect = await f.inspect();
+  assert.deepEqual(
+    inspect.requests.map((r) => r.charge),
+    [lost.charge, declined.charge],
+    "notify and deliver change no charge"
   );
 });

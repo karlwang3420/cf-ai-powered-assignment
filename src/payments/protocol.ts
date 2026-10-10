@@ -41,6 +41,49 @@ export type ProcessorScenario =
   | "lost_webhook"
   | "duplicate_webhook"
   | "unresolved_pending";
+/** A committed charge's state at the processor. */
+export type ChargeState =
+  | "pending"
+  | "succeeded"
+  | "soft_decline"
+  | "hard_decline";
+/** A webhook delivery's state in the processor's outbox. */
+export type DeliveryState = "queued" | "delivered" | "dropped" | "exhausted";
+/** Demo control on a charge: change its state, or send a new event for it. */
+export type ChargeAction = ChargeState | "notify";
+/** Demo control on a delivery: send that same event again. */
+export type DeliveryAction = "deliver";
+
+/**
+ * The mock processor's whole state for one invoice (GET /demo/inspect),
+ * newest first. `actions` lists the demo controls each charge and delivery
+ * allows, from the processor's own state model.
+ */
+export type ProcessorInspection = {
+  invoiceId: string;
+  keyRetention: "indefinite";
+  /** Outcomes queued for the next new charges */
+  scenarios: ProcessorScenario[];
+  requests: {
+    request: ChargeRequest;
+    scenario: ProcessorScenario;
+    /** Null while an outage has not committed the charge */
+    charge: ProcessorCharge | null;
+    state: ChargeState | "uncommitted";
+    resolveAt: number | null;
+    actions: ChargeAction[];
+  }[];
+  outbox: {
+    event: ProcessorWebhook;
+    state: DeliveryState;
+    attempts: number;
+    copiesRemaining: number;
+    dueAt: number;
+    deliveredAt: number | null;
+    lastError: string | null;
+    actions: DeliveryAction[];
+  }[];
+};
 export type ProcessorErrorResponse = {
   error: { code: string; message: string };
 };

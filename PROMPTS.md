@@ -483,3 +483,116 @@
 
 > [14:13:15 (UTC-04:00)] commit
 
+> [14:32:39 (UTC-04:00)] 1. the run invoice function should not trigger collection, otherwise reviewer have no chance to change mock control
+> 
+> 2. i pick soft decline 4 times. now i am stuck. 4 attempt is for auto-retries, not a hard cap. an admin should be able to manually retry collection. and there should also be mock service control to send a new webhook.
+> 
+> you need to look at all fail outcomes and add mock service control where it makes sense. not one by one but with a filter
+
+> [15:00:18 (UTC-04:00)] did you not see the mock service control already there?
+
+> [15:00:50 (UTC-04:00)] no, that's not i am talking about
+
+> [15:04:01 (UTC-04:00)] Settle pending charge: Succeeds / Soft decline / Hard decline
+
+> [15:05:40 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-06605cd8-d2cf-4a92-9b50-2f2862acaa43.png
+> 
+> i cannot see the choices
+
+> [15:08:44 (UTC-04:00)] 1
+
+> [15:16:23 (UTC-04:00)] from what i am seeing what your are changing. you stopped treating the mock service and state as a whole and only fix the symptom and treat everything as an edge case
+
+> [15:20:54 (UTC-04:00)] idealy we have a page to represent mock service and state, but that's too much for this demo. 
+> 
+> but think of the mock server as a whole with it's states beside the billing system's state. 
+> 
+> redesign around that, then figure out the ui control later
+
+> [15:41:50 (UTC-04:00)] i cannot see the ui, data error
+> 
+> C:\Users\Karl\AppData\Local\Temp\pi-clipboard-29a873c8-bc85-4945-a552-3b179baac091.png
+
+> [15:51:21 (UTC-04:00)] PS C:\Users\Karl\codebase\job-application\cf-ai-powered-assignment>  npm run dev
+> npm notice run billing-assistant@1.0.0 dev
+> npm notice run vite dev
+> Default inspector port 9229 not available, using 9230 instead
+> 
+> ⎔ Establishing remote connection...
+> error when starting dev server:
+> Error: Failed to start the remote proxy session. Error reloading remote server: To use Wrangler with Cloudflare Access, please install `cloudflared` from https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation
+>     at startRemoteProxySession (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:78366:10)
+>     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+>     at async maybeStartOrUpdateRemoteProxySession (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:78436:68)
+>     at async file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:81284:80
+>     at async Promise.all (index 0)
+>     at async getDevMiniflareOptions (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:81281:70)
+>     at async BasicMinimalPluginContext.configureServer (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:81715:27)
+>     at async _createServer (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/vite/dist/node/chunks/node.js:26020:84)
+>     at async CAC.<anonymous> (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/vite/dist/node/cli.js:708:18) {
+>   [cause]: {
+>     type: 'error',
+>     reason: 'Error reloading remote server',
+>     cause: UserError: To use Wrangler with Cloudflare Access, please install `cloudflared` from https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation
+>         at getAccessHeaders (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:72610:26)
+>         at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+>         at async #updatePreviewToken (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:78130:25)
+>         at async #onBundleComplete (file:///C:/Users/Karl/codebase/job-application/cf-ai-powered-assignment/node_modules/@cloudflare/vite-plugin/dist/index.mjs:78168:4)
+>         at async Mutex.runWith (C:\Users\Karl\codebase\job-application\cf-ai-powered-assignment\node_modules\@cloudflare\vite-plugin\node_modules\miniflare\dist\src\index.js:82714:48) {
+>       telemetryMessage: 'user access missing cloudflared'
+>     },
+>     source: 'RemoteRuntimeController',
+>     data: undefined
+>   }
+> }
+
+> [15:53:07 (UTC-04:00)] why do i need to do this now?
+
+> [15:55:21 (UTC-04:00)] Install cloudflared
+
+> [15:59:03 (UTC-04:00)] how do i reseed data?
+
+> [16:03:15 (UTC-04:00)] access denied
+> 
+> and why do i need to stop dev server everytime?
+
+> [16:04:38 (UTC-04:00)] i didn't start it. stop it.
+
+> [16:05:32 (UTC-04:00)] switching on Reset demo locally
+
+> [16:46:06 (UTC-04:00)] i thought this was a quick change?
+
+> [16:50:05 (UTC-04:00)] why did you set a 3600s timeout?
+
+> [16:51:32 (UTC-04:00)] i thought this was a quick change and you want me to wait for hours?
+
+> [16:52:33 (UTC-04:00)] fix it
+
+> [16:54:45 (UTC-04:00)] fix it
+
+> [16:56:35 (UTC-04:00)] continue
+
+> [17:04:55 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-7ff61990-f9b1-47e9-9b06-9a1a3e5b3850.png
+> 
+> when i said every failed state needs mock service control, i mean the payment state, not every webhook need a resend, and you talked about mock service state that i can see but i don't see it, what have you done?
+
+> [17:07:17 (UTC-04:00)] stop adding words to my mouth. Older attempts and webhook mechanics under Debug? i never said that
+
+> [17:09:46 (UTC-04:00)] just follow the mock service control that was already there. i already told you what i want, why can't you just do the same thing? tell me what you think i mean
+
+> [17:10:12 (UTC-04:00)] exactly
+
+> [17:11:30 (UTC-04:00)] what are you doing now?
+
+> [17:11:58 (UTC-04:00)] no, why did you add all that code?
+
+> [17:13:36 (UTC-04:00)] all i want is for you to extend current control to the states you missed. why did you keep adding more and more code?
+
+> [17:16:36 (UTC-04:00)] you talked about mock service state exposes in some path. did you mean api or ui?
+
+> [17:22:00 (UTC-04:00)] C:\Users\Karl\AppData\Local\Temp\pi-clipboard-f8a00273-9c73-4196-b94c-8dff05fb4618.png
+> 
+> why do i see a succeeds button there?
+
+> [17:27:38 (UTC-04:00)] commit and make a pr. ask for codex review
+
