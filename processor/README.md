@@ -77,10 +77,11 @@ currency: "USD", methodVersion }`. Identifiers are nonempty, at most 200
 
 Additional demo controls (also require the bearer token):
 
-| Method/path         | Contract                                                                                                                                                                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /demo/settle` | `{ invoiceId, outcome: "succeeded" \| "soft_decline" \| "hard_decline" }`; resolves the invoice's latest pending charge, queues its signed webhook, returns `{ invoiceId, charge }`. Returns 409 if there is no pending charge; terminal outcomes cannot be edited. |
-| `POST /demo/reset`  | `{ invoiceId }`; destructively deletes that invoice's keys/charges, outbox and scenario queue, returns `{ invoiceId, reset: true }`. Other invoices are untouched.                                                                                                  |
+| Method/path            | Contract                                                                                                                                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /demo/settle`    | `{ invoiceId, outcome: "succeeded" \| "soft_decline" \| "hard_decline" }`; resolves the invoice's latest pending charge, queues its signed webhook, returns `{ invoiceId, charge }`. Returns 409 if there is no pending charge; terminal outcomes cannot be edited. |
+| `POST /demo/reset`     | `{ invoiceId }`; destructively deletes that invoice's keys/charges, outbox and scenario queue, returns `{ invoiceId, reset: true }`. Other invoices are untouched.                                                                                                  |
+| `POST /demo/reset-all` | `{}`; destructively deletes every key/charge, outbox entry and scenario queue and cancels the delivery alarm, returns `{ reset: true }`. Used by the hosted demo's full reset.                                                                                      |
 
 Inspection request entries contain `{ request, scenario, charge, resolveAt }`;
 `charge` is null for an outage before commit. Outbox entries contain `{ event,

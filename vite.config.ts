@@ -25,7 +25,11 @@ export default defineConfig(({ mode }) => {
               config: (config) => ({
                 vars: {
                   ...config.vars,
-                  PAYMENT_TIME_SCALE: process.env.PAYMENT_TIME_SCALE ?? "0.2"
+                  PAYMENT_TIME_SCALE: process.env.PAYMENT_TIME_SCALE ?? "0.2",
+                  // tests/demo-runtime.test.mjs turns on hosted demo mode
+                  DEMO_ACCESS_TEAM_DOMAIN:
+                    process.env.DEMO_ACCESS_TEAM_DOMAIN ?? "",
+                  DEMO_ACCESS_AUD: process.env.DEMO_ACCESS_AUD ?? ""
                 }
               }),
               remoteBindings: false,

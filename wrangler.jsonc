@@ -4,6 +4,9 @@
   "main": "src/server.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
+  // Hosted demo: Access protects only the workers.dev hostname, so no version
+  // or preview URLs that would bypass it.
+  "preview_urls": false,
   "ai": { "binding": "AI", "remote": true },
   "observability": { "enabled": true },
   "services": [
@@ -11,7 +14,11 @@
   ],
   "vars": {
     "PROCESSOR_TOKEN": "demo-only-processor-token-not-a-secret",
-    "PROCESSOR_WEBHOOK_SECRET": "demo-only-webhook-hmac-not-a-secret"
+    "PROCESSOR_WEBHOOK_SECRET": "demo-only-webhook-hmac-not-a-secret",
+    // Empty locally. `npm run deploy:demo` sets both, which turns on the
+    // Access check and shared-demo reseeding (src/demo/gate.ts).
+    "DEMO_ACCESS_TEAM_DOMAIN": "",
+    "DEMO_ACCESS_AUD": ""
   },
   // Shared billing database, the source of truth for every customer. Local
   // dev uses a local SQLite copy; `wrangler deploy` provisions the real one.
@@ -45,6 +52,11 @@
       {
         "class_name": "BillingAssistant",
         "name": "BillingAssistant"
+      },
+      // Hosted demo: decides when a new reviewer gets freshly seeded data
+      {
+        "class_name": "DemoSession",
+        "name": "DEMO_SESSION"
       }
     ]
   },
@@ -52,6 +64,10 @@
     {
       "new_sqlite_classes": ["BillingAssistant"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["DemoSession"],
+      "tag": "v2"
     }
   ]
 }

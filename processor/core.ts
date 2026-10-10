@@ -531,6 +531,18 @@ export class Processor {
           );
         return json({ invoiceId, reset: true });
       }
+      if (request.method === "POST" && path === "/demo/reset-all") {
+        // Hosted demo reset: forget every key, delivery and queued scenario so
+        // nothing replays or calls back into the reseeded merchant database.
+        for (const table of [
+          "processor_keys",
+          "processor_outbox",
+          "processor_scenarios"
+        ])
+          this.storage.sql.exec(`DELETE FROM ${table}`);
+        await this.storage.deleteAlarm();
+        return json({ reset: true });
+      }
       if (request.method === "GET" && path === "/demo/inspect") {
         const invoiceId = identity(
           url.searchParams.get("invoiceId"),

@@ -3,7 +3,7 @@
 An AI billing assistant for a usage-based cloud platform, built on Cloudflare
 Workers AI, Agents, Workflows and D1. Explain invoices, investigate usage changes,
 approve credits, and try payment-recovery scenarios. Billing math runs in code,
-not the model; all payments are mocked and **no real money moves**.
+not the model.
 
 **AI-assisted development:** [PROMPTS.md](PROMPTS.md) records the prompt history.
 
@@ -16,7 +16,21 @@ not the model; all payments are mocked and **no real money moves**.
 - **Memory / state:** each customer's agent stores chat history in Durable Object
   SQLite; D1 persists billing, credits and payment records.
 
-## Setup
+## Hosted demo
+
+**Link:** _added after deployment_
+
+The hosted demo needs no setup: open the link and sign in with your email
+(Cloudflare Access sends a one-time code).
+
+**The demo is shared.** Everyone who signs in sees and changes the same data.
+It returns to the seed when someone new signs in after 15 minutes without
+activity, so you normally start fresh; if someone else is using it, a banner
+says so. **Reset demo** in the banner reseeds it at any time, for everyone.
+
+To deploy your own copy, see [deploying the hosted demo](docs/deploy.md).
+
+## Local setup
 
 Requires **Node.js 24+** and a Cloudflare account for chat (Workers AI runs remotely).
 
@@ -32,8 +46,9 @@ Open <http://localhost:5173>. Vite starts both the app and mock payment processo
 empty; it preserves existing data. Stop dev before running setup or direct-file
 billing CLI commands, especially on Windows.
 
-**Local demo only:** there is no authentication. Keep the app and local Explorer
-private. Mutating APIs reject foreign browser origins; originless CLI requests
+**Local demo:** there is no authentication. Keep the app and local Explorer
+private; without the hosted demo's Access settings, the API answers only on
+`localhost`. Mutating APIs reject foreign browser origins; originless CLI requests
 and HMAC-verified processor callbacks remain supported. This is not authentication.
 Payment controls need no AI calls; see [offline, isolated setup](docs/local-testing.md#safe-setup-and-isolation)
 if you want to run without remote bindings.
@@ -86,6 +101,9 @@ CLI finalization does not start collection. Replaying it does not undo an
 already-paid invoice; see [isolated demo setup](docs/local-testing.md#safe-setup-and-isolation)
 for a fresh sandbox.
 
+On the hosted demo, run the invoice in Admin, then open it and use **Debug →
+Reset to unpaid** to get an uncollected invoice.
+
 1. Open the invoice in **Admin → Mock controls** and choose a scenario. It
    applies immediately to future attempts, not past ones.
 2. Click **Collect**. For **Hard decline → success**, click **Simulate card
@@ -115,15 +133,13 @@ when deliberately restarting a demo scenario.
 
 ```sh
 npm run check
-node --test --test-concurrency=2 tests/*.test.mjs
+npm test
 npx vite build
 ```
 
-The bounded test command avoids a previously observed local-runtime stall with
-unrestricted `npm test`; see [validation notes](docs/local-testing.md#automated-verification-no-ai).
-
 ## More documentation
 
+- [Deploying the hosted demo](docs/deploy.md) — Cloudflare Access, shared-demo resets and deploy steps.
 - [Architecture and billing design](docs/architecture.md) — components, AI guardrails, exact money and ledger invariants.
 - [Local testing and CLI](docs/local-testing.md) — isolated demos, recovery scenarios and verification.
 - [Payment Workflow](docs/payment-workflow.md) — payment design and implementation map.

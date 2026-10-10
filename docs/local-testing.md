@@ -47,8 +47,7 @@ process and allocate a **new disposable directory** using the commands above;
 this resets both merchant and processor by isolation, without deleting old
 state. Never reset just the merchant while reusing processor invoice/key IDs.
 The legacy `npm run db:reset` is destructive merchant-only tooling, not a
-payment reset; do not use it on existing demo data. No reset was run on user
-state during implementation/testing. Standalone processor commands and its
+payment reset; do not use it on existing demo data. Standalone processor commands and its
 separate persistence are in [`processor/README.md`](../processor/README.md);
 do not start a duplicate standalone processor alongside Vite.
 
@@ -62,20 +61,8 @@ npm run types
 npx vite build
 ```
 
-Latest validation: **119/119 tests passed** with the full file set at bounded
-concurrency (about 90 seconds on the Windows development machine):
-
-```sh
-node --test --test-concurrency=2 tests/*.test.mjs
-```
-
-One default `npm test` run stalled at a local runtime probe and hit a 600-second
-command timeout without a final summary. That invocation did **not** pass.
-The suspected runtime file passed independently (2/2), and the full bounded run
-passed without omitting tests or forcing process exit. The cause is unproven;
-reduced concurrency is a verified workaround, not a claimed root-cause fix.
-If a run stalls, inspect its logs and stop only processes proven to belong to
-that test invocation, never all Node/workerd processes or an unrelated dev server.
+The full suite takes about a minute. `npm test` runs at most two test files at
+a time because several start their own Workers runtimes.
 
 Store/API tests use fresh D1. Runtime tests use new OS-temp persistence, real
 local Workflow primitives and actual Workers.
@@ -115,8 +102,7 @@ same-origin reconciliation. It reports `PAYMENT_LAYOUT_OK` and
 integration harness can hold
 its isolated server briefly with `PAYMENT_BROWSER_HOLD_MS=60000` for a local
 `browse` smoke pass; it prints `ISOLATED_PAYMENT_ORIGIN`. Never point that pass
-at existing demo state. Unit/fake-step crash tests are not claims that every
-physical crash was injected into the real Vite runtime.
+at existing demo state.
 
 ## Payment walkthrough
 
@@ -198,15 +184,16 @@ idempotency replays. No AI is involved in CLI arithmetic or mutations.
 
 ## Explorer, correlation logs and traces
 
-See [`observability.md`](observability.md) for actual verified routes and query
+See [`observability.md`](observability.md) for routes and query
 examples. Explorer is developer-only and can mutate local resources: prefer
 read-only inspection. Never use raw SQL to “repair” a payment or reservation.
 
 ## Demo security boundary
 
-No real money, card data, email, or payment network is involved. Billing/chat
+No card data, email, or payment network is involved. Billing/chat
 and payment controls have **no authentication**; customer selection is scoping,
 not authorization. Processor bearer and HMAC values in Wrangler/shared protocol
 are deliberately public demo fixtures, **not secrets**. Signed callbacks test
 integrity/deduplication mechanics, not production security. Keep dev on loopback;
-do not expose this demo or Explorer publicly. This work does not deploy anything.
+do not expose local dev or Explorer publicly. The hosted demo is protected by
+Cloudflare Access instead; see [deploying the hosted demo](deploy.md).

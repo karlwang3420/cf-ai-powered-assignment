@@ -1,0 +1,66 @@
+import { BillingError } from "../billing/store.ts";
+import { processorRequest, type PaymentEnv } from "../payments/service.ts";
+import { rebuildDatabase } from "./database.ts";
+
+/** Before the first reset the hosted database has no tables at all. */
+async function ids(db: D1Database, sql: string): Promise<string[]> {
+  try {
+    const { results } = await db.prepare(sql).all<{ id: string }>();
+    return results.map((row) => row.id);
+  } catch (error) {
+    if (String(error).includes("no such table")) return [];
+    throw error;
+  }
+}
+
+/**
+ * Returns the hosted demo to its seed: stops collection runs, clears the mock
+ * processor, rebuilds D1 and deletes each customer's chat. The processor is
+ * cleared before D1 so no old charge can replay or call back into fresh data.
+ */
+export async function resetDemo(
+  env: PaymentEnv,
+  scripts: string[],
+  clearChat: (customerId: string) => Promise<void>
+) {
+  const runs = await ids(
+    env.DB,
+    "SELECT workflow_id AS id FROM payment_collections WHERE owner_active = 1"
+  );
+  for (const id of runs) {
+    try {
+      await (await env.PAYMENT_WORKFLOW.get(id)).terminate();
+    } catch {
+      // Already finished; its owner row disappears with the rebuild anyway.
+    }
+  }
+  const processor = await processorRequest(env, "/demo/reset-all", "POST", {});
+  if (!processor.ok)
+    throw new BillingError(
+      "conflict",
+      `processor reset failed (${processor.status}); nothing was changed`
+    );
+  const before = await ids(env.DB, "SELECT id FROM customers");
+  await rebuildDatabase(env.DB, scripts);
+  const customers = [
+    ...new Set([...before, ...(await ids(env.DB, "SELECT id FROM customers"))])
+  ];
+  // A chat left behind would only show stale history, so keep going.
+  const failed: string[] = [];
+  for (const id of customers) {
+    try {
+      await clearChat(id);
+    } catch {
+      failed.push(id);
+    }
+  }
+  console.log(
+    JSON.stringify({
+      event: "demo_reset",
+      stoppedRuns: runs.length,
+      customers: customers.length,
+      chatClearFailures: failed
+    })
+  );
+  return { stoppedRuns: runs.length, customers, chatClearFailures: failed };
+}

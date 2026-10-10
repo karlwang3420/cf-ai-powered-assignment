@@ -3,7 +3,8 @@
  * are started as Workflows. Credits are deliberately not exposed here: they
  * are only issued through the assistant after a person approves them.
  *
- * There is no authentication: this is a demo over seeded data.
+ * There is no authentication of its own: locally this is a demo over seeded
+ * data, and the hosted demo sits behind Cloudflare Access (see demo/gate.ts).
  */
 import {
   BillingError,
@@ -18,13 +19,16 @@ import {
   type BillingErrorCode
 } from "./billing/store.ts";
 
+import type { DemoEnv } from "./demo/gate.ts";
+import type { DemoStatus } from "./demo/session.ts";
 import { handlePaymentApi } from "./payments/api.ts";
 import { paymentLog, type PaymentEnv } from "./payments/service.ts";
 
-export type ApiEnv = PaymentEnv & {
-  DB: D1Database;
-  INVOICE_WORKFLOW: Pick<Workflow, "create" | "get">;
-};
+export type ApiEnv = PaymentEnv &
+  Pick<DemoEnv, "DEMO_SESSION"> & {
+    DB: D1Database;
+    INVOICE_WORKFLOW: Pick<Workflow, "create" | "get">;
+  };
 
 const STATUS: Record<BillingErrorCode, number> = {
   invalid: 400,
@@ -100,11 +104,15 @@ async function startInvoiceRun(env: ApiEnv, request: Request, now: Date) {
   return json({ id: instance.id }, 202);
 }
 
-/** Returns a response for /api/* requests, or null for anything else. */
+/**
+ * Returns a response for /api/* requests, or null for anything else. `demo` is
+ * the hosted demo's status for this request, or null when demo mode is off.
+ */
 export async function handleApi(
   request: Request,
   env: ApiEnv,
-  now = new Date()
+  now = new Date(),
+  demo: DemoStatus | null = null
 ): Promise<Response | null> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/")) return null;
@@ -138,6 +146,11 @@ export async function handleApi(
         return json(await getInvoice(env.DB, parts[1]));
       case "POST invoice-runs":
         return await startInvoiceRun(env, request, now);
+      case "GET demo":
+        return json(demo ?? { enabled: false });
+      case "POST demo/:id":
+        if (parts[1] !== "reset" || !demo || !env.DEMO_SESSION) break;
+        return json(await env.DEMO_SESSION.getByName("demo").reset());
       case "GET invoice-runs/:id": {
         let instance: WorkflowInstance;
         try {
@@ -148,13 +161,12 @@ export async function handleApi(
         const { status, output, error: failure } = await instance.status();
         return json({ id: instance.id, status, output, error: failure });
       }
-      default:
-        return error(
-          404,
-          "not_found",
-          `no route for ${request.method} ${url.pathname}`
-        );
     }
+    return error(
+      404,
+      "not_found",
+      `no route for ${request.method} ${url.pathname}`
+    );
   } catch (err) {
     if (err instanceof BillingError)
       return error(STATUS[err.code], err.code, err.message);

@@ -1,14 +1,14 @@
 # Payment collection workflow (design)
 
-> **Status:** implemented as a local, mock-money demonstration. Merchant D1,
-> processor Worker, PaymentWorkflow, API/UI/CLI recovery and isolated integration
-> tests are present. The diagrams below remain the approved contract; see the
-> implementation/validation map at the end for limits and explicit test fixtures.
+> **Status:** implemented as a local demonstration: merchant D1, processor
+> Worker, PaymentWorkflow, API/UI/CLI recovery and isolated integration tests.
+> The diagrams describe the design; the implementation map at the end covers
+> limits and test fixtures.
 
 After an invoice is finalized, `PaymentWorkflow` collects payment from a mock
 processor Worker. It handles outages, declines, pending charges and late or
 duplicate webhooks. D1 is the global source of truth for attempts, reservations,
-payments, webhook events and ledger entries. No real money or email is involved.
+payments, webhook events and ledger entries.
 
 ## Collection and dunning loop
 
@@ -252,22 +252,20 @@ or charging again.
 - **Late results remain actionable:** financial application is independent of
   Workflow lifetime; durable unapplied events have an explicit local retry owner.
 
-Runtime validation must verify Cloudflare `waitForEvent` / `sendEvent` signatures,
-timeout handling, early-event buffering/retention and local behavior. Ensure
-exhausted charge-step retries reach recovery rather than just failing the run.
-Correctness must not depend on event buffering: D1 and processor lookup remain
-the recovery sources. Add the `cash` ledger account through a new migration,
-update credit guards, and extend reconciliation to cover payments/reservations.
-Keep these records in global D1, not chat Durable Objects.
+Correctness does not depend on Workflow event buffering: D1 and processor
+lookup remain the recovery sources. Exhausted charge-step retries move to
+recovery rather than failing the run. Payments add a `cash` ledger account;
+credit guards and reconciliation cover payments and reservations. These records
+live in global D1, not chat Durable Objects.
 
 ## Demo controls and validation
 
 Processor scenarios: success, soft decline, hard decline, outage, **success
-with lost response**, pending, lost webhook and duplicate webhook. Shorten
-dunning/wait delays to seconds; notices are local timeline/outbox entries.
-Expose a simulated card update and **Reconcile payments** action for recovery.
+with lost response**, pending, lost webhook and duplicate webhook. Dunning and
+wait delays are shortened to seconds; notices are local timeline/outbox entries.
+A simulated card update and **Reconcile payments** action drive recovery.
 
-Validate:
+The tests verify:
 
 1. Lost response yields one processor charge and one balanced posting.
 2. Unknown / unavailable / `not found` retains the reservation and never gets a
@@ -281,7 +279,7 @@ Validate:
 6. A full credit during a card-update wait settles the invoice, not past due.
 7. Repeated hard declines/card updates stop at the shared limit; manual recovery
    preserves attempt numbering and cannot bypass unresolved-charge blocking.
-8. Run a local two-Worker integration test for real Workflow event behavior in
+8. Real Workflow event behavior, through a local two-Worker integration test in
    addition to store/unit tests.
 
 ## Implementation and validation map
@@ -300,17 +298,17 @@ Validate:
   mock processor is told to decide it (**Mock controls → Settle pending
   charge**, `POST /demo/settle`). That changes only processor state: the
   merchant learns the outcome through the normal signed webhook or an
-  original-key lookup, and terminal outcomes still cannot be changed. No real money, email or card information exists.
+  original-key lookup, and terminal outcomes still cannot be changed.
 - **Runtime:** `src/payment-workflow.ts`, `src/payments/collection.ts` and
-  `service.ts` run actual Workflow checkpoints, sleeps and events. Charge retries
+  `service.ts` run Workflow checkpoints, sleeps and events. Charge retries
   use two retries after the first call; original-key automatic recovery has
   three checks. Demo waits are 30 seconds, dunning 3/6/9 seconds;
   the isolated `payment-test` Vite mode scales them by `PAYMENT_TIME_SCALE`
   (default 0.2) so integration tests finish faster. Elapsed durable
   deadlines skip sleeping, not the D1 re-read or status lookup; they never extend
-  a deadline. A real local timeout regression caught and fixed the emulator's
-  rejection of `sleepUntil` in the past.
-- **Runtime signatures actually exercised:** `step.waitForEvent(name,
+  a deadline, which also avoids the local emulator rejecting `sleepUntil` in
+  the past.
+- **Workflow event APIs:** `step.waitForEvent(name,
 { type, timeout })` and `instance.sendEvent({ type, payload })`. An isolated
   probe observes early buffering after creation, event-type matching and caught
   timeout. Financial correctness still does not assume indefinite event
@@ -329,25 +327,24 @@ Validate:
   resume, lost response, missing/duplicate webhook, pending, needs-review/late
   signed success and full-credit card timeout. It asserts unique payments,
   balanced ledger, retained unknown reservation and unchanged attempt budget.
-  The runtime companion test covers actual outage backoff and automatic
-  InvoiceWorkflow collection. Tests never reset user `.wrangler` state.
-- **Explicit integration fixtures:** the late case uses the never-resolving
-  pending preset and settles it only after the test observes needs-review and
-  the ended original run; normal signing/delivery then posts the late success.
-  Full-credit testing uses a
-  harness-only Vite transform to call unchanged `issueCredit` on the live bound
-  D1, preserving atomic batch semantics without a production mutation endpoint
-  or AI call. See [local testing](local-testing.md) for exact isolation details.
-- **Layered invariant/crash evidence:** store/API tests inject rollback,
+  The runtime companion test covers outage backoff and automatic
+  InvoiceWorkflow collection. Tests never touch the normal `.wrangler` state.
+- **Integration fixtures:** the late case uses the never-resolving pending
+  preset and settles it only after the test observes needs-review and the
+  ended original run; normal signing/delivery then posts the late success.
+  Full-credit testing uses a harness-only Vite transform to call unchanged
+  `issueCredit` on the live bound D1, preserving atomic batch semantics without
+  a production mutation endpoint or AI call. See [local testing](local-testing.md)
+  for exact isolation details.
+- **Crash and race tests:** store/API tests inject rollback,
   inbox-application/notification failure, duplicates, stale/late outcomes and
   credit/reservation races. Fake-step tests cover unavailable/not-found/expired
-  retention and repeated hard-decline budgets. These are not claims that every
-  physical crash boundary or every hostile event ordering was injected through
-  a real browser and both running Workers.
-- **Observability actually probed:** pinned plugin 1.50.0 / Wrangler 4.118.0
+  retention and repeated hard-decline budgets. Not every crash point or event
+  ordering is injected into the full two-Worker runtime.
+- **Observability:** pinned plugin 1.50.0 / Wrangler 4.118.0
   serve `/cdn-cgi/local/explorer`, structured correlation logs and local spans
-  for both Workers. [Observability](observability.md) documents the verified
-  read-only query route and limitations. Financial timeline remains D1 truth.
+  for both Workers. [Observability](observability.md) documents the read-only
+  query route and limitations. Financial timeline remains D1 truth.
 
 ### Deliberate boundaries
 
@@ -369,6 +366,4 @@ moment is not fenced; wait for active runs to settle before resetting.
 UI invoice runs start collection automatically; direct-D1 CLI invoice
 finalization leaves collection to the explicit local API command/control so a
 scenario can be chosen first. Stop dev for migrations/legacy direct-file CLI
-writes on Windows; new payment CLI commands use the running API. Existing demo
-state was not migrated or reset during implementation. Independent review and
-production/security hardening remain separate gates.
+writes on Windows; new payment CLI commands use the running API.

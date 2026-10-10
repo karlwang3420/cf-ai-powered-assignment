@@ -7,14 +7,15 @@
   "scripts": {
     "dev": "vite dev",
     "start": "vite dev",
-    "deploy": "vite build && wrangler deploy",
+    "deploy": "node scripts/deploy-demo.mjs",
+    "deploy:demo": "node scripts/deploy-demo.mjs",
     "types": "wrangler types env.d.ts",
     "format": "oxfmt --write .",
     "lint": "oxlint src/",
     "db:setup": "node scripts/billing.mjs setup",
     "db:reset": "node scripts/billing.mjs reset",
     "billing": "node scripts/billing.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-concurrency=2 tests/*.test.mjs",
     "check": "oxfmt --check . && oxlint src/ && tsc"
   },
   "dependencies": {

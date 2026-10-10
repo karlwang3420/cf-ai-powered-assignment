@@ -2,25 +2,21 @@
 
 Verified with Node 24.18.0, Vite 8.1.5, `@cloudflare/vite-plugin` **1.50.0**,
 Wrangler **4.118.0**, plugin Miniflare **5.20260730.0-alpha**, and workerd
-**1.20260730.1**. These are installed/pinned tools, not a claim about all
-Cloudflare versions. Standalone store/CLI tests still use Miniflare 4.20260721.0.
+**1.20260730.1**; other versions may differ. Standalone store/CLI tests still use Miniflare 4.20260721.0.
 
 ## Explorer
 
 Open <http://localhost:5173/cdn-cgi/local/explorer> while Vite is running.
-`/cdn-cgi/explorer` is a supported alias on this version. Both are real Local
-Explorer routes, not the application's SPA fallback. The billing panel links
+`/cdn-cgi/explorer` is an alias on this version. The billing panel links
 to the canonical route. Inspect `payment-workflow` and `invoice-workflow`,
 instances/checkpoints, D1, processor DOs, and **Observability**.
 
-The integration test checks the actual Explorer page title **and** queries the
-local trace store for recorded payment correlation logs and spans attributed to
-both Workers. This proves runtime data exists, not just that documentation or
-a navigation tab mentions tracing. Logs also print as structured JSON in the
+The integration test checks the Explorer page title and queries the local trace
+store for payment correlation logs and spans from both Workers. Logs also print as structured JSON in the
 Vite terminal. Local tracing is enabled by the installed plugin's
 `X_LOCAL_OBSERVABILITY` default; explicitly setting it false disables these
-queries. Root Wrangler observability is enabled, but no deployment or hosted
-trace validation was performed.
+queries. Root Wrangler observability is enabled; hosted traces are not covered
+here.
 
 The read-only local query endpoint is:
 
@@ -75,5 +71,5 @@ Financial state, not telemetry, answers whether money was posted:
 - Use **Reconcile payments** or `billing reconcile-payments`, not raw SQL,
   force-release or a fresh key, to recover unresolved money.
 
-Local traces/logs are developer diagnostics, not an authenticated audit export,
-production retention guarantee, or proof of real payment processing.
+Local traces/logs are developer diagnostics, not an authenticated audit export
+or production retention guarantee.

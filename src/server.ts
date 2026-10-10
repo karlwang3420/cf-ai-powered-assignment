@@ -13,8 +13,10 @@ import {
 import { handleApi } from "./api";
 import { createBillingTools } from "./assistant-tools";
 import { BillingError, getCustomer } from "./billing/store";
+import { admitDemoRequest } from "./demo/gate";
 import { withDedupedStreamText } from "./workers-ai";
 
+export { DemoSession } from "./demo/demo-session";
 export { InvoiceWorkflow } from "./invoice-workflow";
 export { PaymentWorkflow } from "./payment-workflow";
 
@@ -132,8 +134,11 @@ function fixedReply(text: string) {
 
 export default {
   async fetch(request: Request, env: Env) {
+    // Hosted demo only: require Access and reseed for a new reviewer first
+    const demo = await admitDemoRequest(request, env);
+    if (demo instanceof Response) return demo;
     return (
-      (await handleApi(request, env)) ??
+      (await handleApi(request, env, new Date(), demo)) ??
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );

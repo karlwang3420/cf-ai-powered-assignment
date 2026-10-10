@@ -612,6 +612,45 @@ test("processor debug reset forgets only that invoice so the same key charges af
   );
 });
 
+test("processor reset-all forgets every invoice and its pending deliveries", async (t) => {
+  const f = fixture(t);
+  await f.scenario(["pending", "success"]);
+  const pending = await (await f.call("/charges", "POST", payload())).json();
+  assert.equal(pending.charge.status, "pending");
+  const other = payload({
+    invoiceId: "inv_2",
+    attemptId: "attempt_2",
+    idempotencyKey: "inv_2:1"
+  });
+  assert.ok((await f.call("/charges", "POST", other)).ok);
+  assert.notEqual(f.alarmAt, null, "a delivery is scheduled");
+  assert.equal(
+    (await f.call("/demo/reset-all", "POST", {}, "wrong")).status,
+    401
+  );
+  assert.equal((await f.call("/demo/reset-all", "POST", {})).status, 200);
+  for (const table of [
+    "processor_keys",
+    "processor_outbox",
+    "processor_scenarios"
+  ])
+    assert.equal(
+      f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,
+      0,
+      table
+    );
+  assert.equal(f.alarmAt, null, "no callback into the reseeded merchant");
+  f.advance(PENDING_DELAY_MS * 2);
+  await f.processor.alarm();
+  assert.equal(f.deliveries.length, 0);
+  const again = await (await f.call("/charges", "POST", payload())).json();
+  assert.notEqual(
+    again.charge.processorPaymentId,
+    pending.charge.processorPaymentId,
+    "the same key charges afresh"
+  );
+});
+
 test("processor demo settle resolves only a pending charge through the normal signed webhook", async (t) => {
   const f = fixture(t);
   assert.equal(

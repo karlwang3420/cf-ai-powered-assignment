@@ -12,6 +12,7 @@ import { api } from "./client-api";
 import { AdminPage } from "./components/admin-page";
 import { BillingPanel } from "./components/billing-panel";
 import { ChatPanel } from "./components/chat-panel";
+import { DemoBanner } from "./components/demo-banner";
 
 function ThemeToggle() {
   const [dark, setDark] = useState(
@@ -138,7 +139,7 @@ function Shell() {
               />
               Billing Assistant
             </h1>
-            {view === "customer" ? (
+            {view === "customer" && (
               <Badge variant="secondary">
                 <ChatCircleDotsIcon
                   size="0.75rem"
@@ -147,8 +148,6 @@ function Shell() {
                 />
                 Llama 3.3
               </Badge>
-            ) : (
-              <Badge variant="warning">Mock money</Badge>
             )}
           </div>
           <div className="flex items-center gap-3 min-w-0 w-full sm:w-auto">
@@ -176,6 +175,7 @@ function Shell() {
           </div>
         </div>
       </header>
+      <DemoBanner />
 
       {loadError ? (
         <div className="p-8">

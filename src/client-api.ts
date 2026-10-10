@@ -4,6 +4,7 @@ import type {
   PaymentDetail,
   PaymentInboxEvent
 } from "./billing/payments";
+import type { DemoStatus } from "./demo/session";
 import type { ProcessorScenario } from "./payments/protocol";
 import type { reconcilePaymentCollections } from "./payments/service";
 import type {
@@ -129,7 +130,11 @@ export const api = {
       body: JSON.stringify({ customerId, month })
     }),
   invoiceRun: (id: string) =>
-    request<InvoiceRun>(`/api/invoice-runs/${encodeURIComponent(id)}`)
+    request<InvoiceRun>(`/api/invoice-runs/${encodeURIComponent(id)}`),
+  /** Hosted demo status; `enabled: false` in local dev. */
+  demo: () => request<DemoStatus | { enabled: false }>("/api/demo"),
+  /** Hosted demo only: return every customer to the seed, for everyone. */
+  resetDemo: () => request<DemoStatus>("/api/demo/reset", { method: "POST" })
 };
 
 /** "2026-09" → "September 2026" */

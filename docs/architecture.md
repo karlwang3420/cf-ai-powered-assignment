@@ -138,10 +138,13 @@ single-threaded design and 10 GB limit do not replace.
 Not implemented: real payment processing/refunds, proration for mid-month plan
 changes, price changes over time, taxes, or currencies other than USD.
 
-Billing/chat/payment-control APIs have no authentication. Chat credits require
-approval; the local operator CLI also issues explicitly approved credits.
-Processor bearer/HMAC credentials are public fixtures, not secrets. There is no
-real money, card data or email. Do not expose dev or Explorer publicly.
+Billing/chat/payment-control APIs have no authentication of their own; the
+hosted demo sits behind Cloudflare Access, verified in the Worker, and local dev
+answers only on loopback ([deploying the hosted demo](deploy.md)). Customer
+selection is scoping, not authorization. Chat credits require approval; the
+local operator CLI also issues explicitly approved credits. Processor
+bearer/HMAC credentials are public fixtures, not secrets. There is no card data
+or email. Do not expose dev or Explorer publicly.
 
 Local state persists under `.wrangler/state/`; isolated demos use a separate
 persistence directory. See [local testing](local-testing.md) for safe setup and
