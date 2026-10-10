@@ -25,8 +25,11 @@ on their machine. Everyone who signs in shares one copy of the data.
 - **What a reset clears.** It stops active payment runs, clears the mock
   processor (keys, deliveries, scenarios), rebuilds D1 from the bundled
   migrations and seed in one atomic batch, and deletes each customer's chat.
-  Requests that arrive during a reset wait until it finishes. The first
-  signed-in request after deploy seeds the empty database the same way.
+  Requests that arrive during a reset wait until it finishes, and if a reset
+  fails partway, every request retries it until it completes. The processor
+  finishes a webhook it is already sending before it clears its records.
+  The first signed-in request after deploy seeds the empty database the same
+  way.
   Requests and invoice runs already in progress are not stopped, so a
   **Reset demo** clicked while someone is working can be followed by a few of
   their writes. Automatic resets happen only after 15 idle minutes, when

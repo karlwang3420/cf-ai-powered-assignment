@@ -45,19 +45,26 @@ function status(
   };
 }
 
-/** Records a request; the first request ever also seeds the database. */
+/**
+ * Records a request. The first request ever also seeds the database, and an
+ * unfinished earlier reset (`resetPending`) is retried before anything else.
+ */
 export function admitSession(
   state: DemoState,
   session: string,
   expires: number,
-  now: number
+  now: number,
+  resetPending = false
 ): { reset: boolean; state: DemoState; status: DemoStatus } {
   const sessions = Object.fromEntries(
     Object.entries(state.sessions).filter(([, s]) => s.expires > now)
   );
   const idle =
     state.lastActivity === null || now - state.lastActivity >= IDLE_MS;
-  const reset = state.lastResetAt === null || (!(session in sessions) && idle);
+  const reset =
+    resetPending ||
+    state.lastResetAt === null ||
+    (!(session in sessions) && idle);
   const othersActive =
     !reset &&
     Object.entries(sessions).some(

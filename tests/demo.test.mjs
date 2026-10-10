@@ -158,6 +158,14 @@ test("a new session reseeds only an idle demo; a returning one keeps its data", 
   assert.equal(r.reset, true, "an expired Access session counts as new");
   assert.deepEqual(Object.keys(r.state.sessions), ["carol:1"]);
 
+  const busy = admitSession(r.state, "carol:1", exp, exp + IDLE_MS + 1);
+  assert.equal(busy.reset, false);
+  assert.equal(
+    admitSession(r.state, "carol:1", exp, exp + IDLE_MS + 1, true).reset,
+    true,
+    "an unfinished reset is retried even mid-session"
+  );
+
   const manual = resetSession(r.state, exp + IDLE_MS + 5);
   assert.equal(manual.status.reset, true);
   assert.deepEqual(Object.keys(manual.state.sessions), ["carol:1"]);

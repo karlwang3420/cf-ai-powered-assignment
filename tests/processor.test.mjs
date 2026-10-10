@@ -651,6 +651,52 @@ test("processor reset-all forgets every invoice and its pending deliveries", asy
   );
 });
 
+test("processor reset-all waits for a webhook already being sent, then sends no more", async (t) => {
+  let release;
+  const held = new Promise((resolve) => {
+    release = () => resolve(new Response(null, { status: 204 }));
+  });
+  const f = fixture(t, () => held);
+  for (const n of [1, 2])
+    assert.ok(
+      (
+        await f.call(
+          "/charges",
+          "POST",
+          payload({
+            invoiceId: `inv_${n}`,
+            attemptId: `attempt_${n}`,
+            idempotencyKey: `inv_${n}:1`
+          })
+        )
+      ).ok
+    );
+  const ticks = async (n = 20) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+  };
+  const alarm = f.processor.alarm();
+  while (f.deliveries.length === 0) await ticks(1);
+
+  let resetDone = false;
+  const reset = f.call("/demo/reset-all", "POST", {}).then((response) => {
+    resetDone = true;
+    return response;
+  });
+  await ticks();
+  assert.equal(resetDone, false, "the reset waits for the delivery in flight");
+  release();
+  await alarm;
+  assert.equal((await reset).status, 200);
+  assert.equal(f.deliveries.length, 1, "the second webhook is never sent");
+  assert.equal(
+    f.db.prepare("SELECT COUNT(*) AS n FROM processor_outbox").get().n,
+    0
+  );
+  assert.equal(f.alarmAt, null);
+  await f.processor.alarm();
+  assert.equal(f.deliveries.length, 1);
+});
+
 test("processor demo settle resolves only a pending charge through the normal signed webhook", async (t) => {
   const f = fixture(t);
   assert.equal(

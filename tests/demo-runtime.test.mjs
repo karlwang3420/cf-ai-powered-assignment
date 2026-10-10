@@ -136,7 +136,42 @@ test(
       // server (a parallel test or your dev server) has a different config.
       cacheDir: path.join(directory, "vite-cache"),
       server: { host: "127.0.0.1", port: 0 },
-      clearScreen: false
+      clearScreen: false,
+      plugins: [
+        {
+          // Test-only: a route that makes the next D1 rebuild fail once,
+          // after the processor has already been cleared
+          name: "demo-reset-failure-fixture",
+          enforce: "pre",
+          transform(code, id) {
+            const file = id.replaceAll("\\", "/");
+            if (file.endsWith("/src/server.ts")) {
+              const seam = "async fetch(request: Request, env: Env) {";
+              assert.ok(code.includes(seam));
+              return code.replace(
+                seam,
+                `${seam}
+          if (new URL(request.url).pathname === "/api/__test-fail-next-rebuild") {
+            await env.DB.prepare("CREATE TABLE IF NOT EXISTS test_fail_rebuild (x)").run();
+            return new Response(null, { status: 204 });
+          }`
+              );
+            }
+            if (file.endsWith("/src/demo/reset.ts")) {
+              const seam = "  await rebuildDatabase(env.DB, scripts);";
+              assert.ok(code.includes(seam));
+              return code.replace(
+                seam,
+                `  if (await env.DB.prepare("SELECT 1 FROM sqlite_master WHERE name = 'test_fail_rebuild'").first()) {
+    await env.DB.prepare("DROP TABLE test_fail_rebuild").run();
+    throw new Error("injected rebuild failure");
+  }
+${seam}`
+              );
+            }
+          }
+        }
+      ]
     });
     await server.listen();
     const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
@@ -266,5 +301,19 @@ test(
     ).body;
     assert.equal(processor.requests.length, 1);
     assert.notEqual(processor.requests[0].charge.processorPaymentId, charged);
+
+    // A reset that fails after clearing the processor is retried by the next
+    // request, even from a session that would not otherwise reset
+    assert.equal(
+      (await fetch(`${origin}/api/__test-fail-next-rebuild`)).status,
+      204
+    );
+    const failed = await asBob("/demo/reset", "POST");
+    assert.equal(failed.status, 500);
+    // Alice is active and known, so only the pending mark makes this reset
+    const retried = await asAlice("/demo");
+    assert.equal(retried.body.reset, true);
+    assert.equal((await asAlice("/payments/inv_cus_acme_2026-09")).status, 404);
+    assert.equal((await asAlice("/demo")).body.reset, false, "done once");
   }
 );

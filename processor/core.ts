@@ -180,6 +180,9 @@ export class Processor {
   private readonly now: () => number;
   private readonly storage: ProcessorStorage;
   private readonly options: ProcessorOptions;
+  /** The running alarm, so a full reset can wait for its delivery to finish */
+  private delivering: Promise<void> | null = null;
+  private stopDelivering = false;
   constructor(storage: ProcessorStorage, options: ProcessorOptions) {
     this.storage = storage;
     this.options = options;
@@ -535,6 +538,13 @@ export class Processor {
       if (request.method === "POST" && path === "/demo/reset-all") {
         // Hosted demo reset: forget every key, delivery and queued scenario so
         // nothing replays or calls back into the reseeded merchant database.
+        // A webhook already being sent finishes first, against the old data.
+        this.stopDelivering = true;
+        try {
+          await this.delivering?.catch(() => {});
+        } finally {
+          this.stopDelivering = false;
+        }
         for (const table of [
           "processor_keys",
           "processor_outbox",
@@ -624,10 +634,20 @@ export class Processor {
     }
   }
   async alarm(): Promise<void> {
+    const run = this.deliver();
+    this.delivering = run;
+    try {
+      await run;
+    } finally {
+      if (this.delivering === run) this.delivering = null;
+    }
+  }
+
+  private async deliver(): Promise<void> {
     await this.arm();
     this.progress();
     // Each alarm does bounded work. Leases recover a crash while awaiting callback.
-    for (let count = 0; count < 16; count++) {
+    for (let count = 0; count < 16 && !this.stopDelivering; count++) {
       const row = this.rows<OutboxRow>(
         "SELECT * FROM processor_outbox WHERE state = 'queued' AND due_at <= ? ORDER BY due_at, rowid LIMIT 1",
         this.now()
