@@ -21,7 +21,9 @@ on their machine. Everyone who signs in shares one copy of the data.
   has made a request for 15 minutes, so overlapping reviewers never wipe each
   other's work, and a returning session keeps its data. The UI polls while
   open, so an open tab counts as activity. **Reset demo** in the banner
-  reseeds at any time, for everyone.
+  reseeds at any time, for everyone. The banner re-reads the status every 30
+  seconds and when **Reset demo** is opened, so it warns when someone else is
+  active and offers a reload after someone else resets.
 - **What a reset clears.** It stops active payment runs, clears the mock
   processor (keys, deliveries, scenarios), rebuilds D1 from the bundled
   migrations and seed in one atomic batch, and deletes each customer's chat.

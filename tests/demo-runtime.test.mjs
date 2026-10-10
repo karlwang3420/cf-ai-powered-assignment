@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
+import { until, withBrowser } from "./helpers/browser.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -315,5 +316,53 @@ ${seam}`
     assert.equal(retried.body.reset, true);
     assert.equal((await asAlice("/payments/inv_cus_acme_2026-09")).status, 404);
     assert.equal((await asAlice("/demo")).body.reset, false, "done once");
+
+    // The banner in a real browser, signed in as a third reviewer
+    const carol = await signIn(issuer, "carol");
+    const ran = await withBrowser(async ({ send, evaluate }) => {
+      await send("Network.enable");
+      await send("Network.setExtraHTTPHeaders", {
+        headers: { "Cf-Access-Jwt-Assertion": carol }
+      });
+      const text = () => evaluate("document.body.innerText");
+      const click = (label) =>
+        evaluate(
+          `[...document.querySelectorAll("button")].find((b) => b.textContent === ${JSON.stringify(label)}).click()`
+        );
+      await send("Page.navigate", { url: origin });
+      await until(async () => (await text()).includes("Shared demo"), "banner");
+      assert.match(await text(), /Someone else has used it/);
+      assert.doesNotMatch(await text(), /reset since this page loaded/);
+
+      // Bob resets elsewhere; opening Reset demo re-reads the status
+      assert.equal((await asBob("/demo/reset", "POST")).status, 200);
+      await click("Reset demo");
+      await until(
+        async () => (await text()).includes("reset since this page loaded"),
+        "reset elsewhere"
+      );
+      await click("Cancel");
+      await until(async () => (await text()).includes("Reload"), "reload");
+
+      // Confirming a reset reloads onto the fresh data
+      const before = (await asAlice("/demo")).body.lastResetAt;
+      await click("Reset demo");
+      await until(
+        async () => (await text()).includes("for everyone?"),
+        "confirm"
+      );
+      await click("Reset");
+      await until(
+        async () => (await asAlice("/demo")).body.lastResetAt !== before,
+        "browser reset"
+      );
+      await until(
+        async () =>
+          (await text()).includes("Shared demo") &&
+          !(await text()).includes("reset since this page loaded"),
+        "reloaded"
+      );
+    });
+    if (!ran) console.log("DEMO_BANNER_SKIPPED: Chrome/Edge unavailable");
   }
 );

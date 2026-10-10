@@ -1,31 +1,51 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Text } from "@cloudflare/kumo";
 import { UsersThreeIcon } from "@phosphor-icons/react";
 import type { DemoStatus } from "../demo/session";
 import { api } from "../client-api";
 
+const POLL_MS = 30_000;
+
 /**
  * Hosted demo only: everyone who signs in shares one copy of the data. Says
- * when it resets and offers a reset; renders nothing in local dev.
+ * when it resets, whether someone else is using it, and offers a reset;
+ * renders nothing in local dev. Status is re-read while the page is open.
  */
 export function DemoBanner() {
   const [status, setStatus] = useState<DemoStatus | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The reset this page loaded after; a later one means its data is gone
+  const loadedAfter = useRef<string | null | undefined>(undefined);
+  const mounted = useRef(true);
 
-  useEffect(() => {
-    let stale = false;
+  const refresh = useCallback(() => {
     api
       .demo()
-      .then((s) => !stale && s.enabled && setStatus(s))
+      .then((s) => {
+        if (!mounted.current || !s.enabled) return;
+        if (loadedAfter.current === undefined)
+          loadedAfter.current = s.lastResetAt;
+        setStatus(s);
+      })
       .catch(() => {});
-    return () => {
-      stale = true;
-    };
   }, []);
 
+  useEffect(() => {
+    mounted.current = true;
+    refresh();
+    const timer = setInterval(refresh, POLL_MS);
+    return () => {
+      mounted.current = false;
+      clearInterval(timer);
+    };
+  }, [refresh]);
+
   if (!status) return null;
+  const resetElsewhere =
+    loadedAfter.current !== undefined &&
+    status.lastResetAt !== loadedAfter.current;
 
   const reset = async () => {
     setResetting(true);
@@ -50,9 +70,20 @@ export function DemoBanner() {
         without activity.
         {status.othersActive &&
           ` Someone else has used it in the last ${status.idleMinutes} minutes.`}
+        {resetElsewhere &&
+          " The demo has been reset since this page loaded; reload to see it."}
         {error && ` ${error}`}
       </Text>
       <div className="flex items-center gap-2 ml-auto">
+        {resetElsewhere && !confirming && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => location.reload()}
+          >
+            Reload
+          </Button>
+        )}
         {confirming ? (
           <>
             <Text size="xs" variant="secondary">
@@ -80,7 +111,11 @@ export function DemoBanner() {
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => setConfirming(true)}
+            onClick={() => {
+              setConfirming(true);
+              // Warn from current activity, not what was true at load
+              refresh();
+            }}
           >
             Reset demo
           </Button>
