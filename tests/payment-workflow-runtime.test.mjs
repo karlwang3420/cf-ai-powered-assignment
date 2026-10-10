@@ -111,6 +111,9 @@ test(
     server = await createServer({
       configFile: path.join(root, "vite.config.ts"),
       mode: "payment-test",
+      // Own dependency cache: a shared one is rebuilt whenever another Vite
+      // server (a parallel test or your dev server) has a different config.
+      cacheDir: path.join(directory, "vite-cache"),
       server: { host: "127.0.0.1", port: 0 },
       clearScreen: false
     });
