@@ -13,9 +13,10 @@ on their machine. Everyone who signs in shares one copy of the data.
   Access application fails closed. A Worker deployed without the Access
   settings answers API requests only on `localhost`. The processor's signed
   callback is the only exception, and only over the service binding.
-- **Same-site only.** Chat connections from another site are refused, so a
-  page a reviewer visits cannot use their Access session to chat
-  ([`src/origin.ts`](../src/origin.ts)); API mutations have the same check.
+- **Same-site only.** API and chat requests from another site are refused
+  before anything else runs ([`src/origin.ts`](../src/origin.ts)), so a page a
+  reviewer visits cannot use their Access session to chat, change data, or keep
+  the demo from resetting.
 - **Fresh data for each reviewer.** A singleton `DemoSession` Durable Object
   sees every request. A new Access session reseeds the demo only when nobody
   has made a request for 15 minutes, so overlapping reviewers never wipe each
@@ -28,7 +29,8 @@ on their machine. Everyone who signs in shares one copy of the data.
   processor (keys, deliveries, scenarios), rebuilds D1 from the bundled
   migrations and seed in one atomic batch, and deletes each customer's chat.
   Requests that arrive during a reset wait until it finishes, and if a reset
-  fails partway, every request retries it until it completes. The processor
+  fails partway (including a run it cannot stop or a chat it cannot clear),
+  every request retries it until it completes. The processor
   finishes a webhook it is already sending before it clears its records.
   The first signed-in request after deploy seeds the empty database the same
   way.
@@ -71,9 +73,9 @@ You need a Cloudflare account with Workers and Zero Trust (Access) enabled.
    ```
 
    The script builds both Workers and deploys the processor, then the app with
-   the Access settings. On the first deploy it puts the processor up once
-   without its callback binding, because a service binding's target must
-   already exist. Wrangler creates the D1 database on the first deploy.
+   the Access settings, because a service binding's target must already
+   exist. On the first deploy the processor goes up without its callback
+   binding and is redeployed with it after the app. Wrangler creates the D1 database on the first deploy.
 
 6. **Check it.** Open the hostname in a private window: you should get the
    Access login page. After signing in, the app loads with the seeded

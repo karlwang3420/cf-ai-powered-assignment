@@ -11,18 +11,21 @@ export function isCrossSite(request: Request): boolean {
 }
 
 /**
- * Browsers open WebSockets to other sites without CORS and with cookies,
- * including a hosted reviewer's Access session. Chat agents therefore refuse
- * cross-site requests, locally and when hosted.
+ * Browsers send cookies, including a hosted reviewer's Access session, with
+ * cross-site WebSockets and simple requests, without CORS. The API and chat
+ * agents therefore refuse cross-site requests before anything else runs, so
+ * another site cannot chat, mutate, or keep the shared demo from resetting.
  */
-export function refuseCrossSiteAgent(request: Request): Response | null {
-  if (!new URL(request.url).pathname.startsWith("/agents/")) return null;
+export function refuseCrossSite(request: Request): Response | null {
+  const { pathname } = new URL(request.url);
+  if (!pathname.startsWith("/api/") && !pathname.startsWith("/agents/"))
+    return null;
   if (!isCrossSite(request)) return null;
   return Response.json(
     {
       error: {
         code: "forbidden",
-        message: "Cross-origin agent requests are not allowed"
+        message: "Cross-origin requests are not allowed"
       }
     },
     { status: 403 }

@@ -130,7 +130,7 @@ export async function checkPaymentLayout(origin, invoiceId) {
       await until(
         () =>
           evaluate(
-            `location.href === ${JSON.stringify(resetUrl)} && document.body.innerText.includes('Cross-origin mutations are not allowed')`
+            `location.href === ${JSON.stringify(resetUrl)} && document.body.innerText.includes('Cross-origin requests are not allowed')`
           ),
         "form rejected"
       );

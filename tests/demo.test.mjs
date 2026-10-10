@@ -14,7 +14,8 @@ import {
 import { accessSession, verifyAccessJwt } from "../src/demo/access.ts";
 import { rebuildDatabase } from "../src/demo/database.ts";
 import { admitDemoRequest } from "../src/demo/gate.ts";
-import { refuseCrossSiteAgent } from "../src/origin.ts";
+import { refuseCrossSite } from "../src/origin.ts";
+import { deploySteps } from "../scripts/deploy-demo.mjs";
 import {
   PROCESSOR_CALLBACK_ORIGIN,
   PROCESSOR_WEBHOOK_PATH
@@ -391,11 +392,11 @@ test("hosted demo requests need a valid Access token; local dev is unaffected", 
   );
 });
 
-test("chat agents refuse cross-site browser requests, locally and hosted", () => {
+test("the API and chat agents refuse cross-site browser requests, locally and hosted", () => {
   const agent = (
     headers,
     url = "http://localhost:5173/agents/billing-assistant/cus_acme"
-  ) => refuseCrossSiteAgent(new Request(url, { headers }));
+  ) => refuseCrossSite(new Request(url, { headers }));
   assert.equal(agent({}), null, "CLI and tests send no Origin");
   assert.equal(
     agent({ Origin: "http://localhost:5173", Upgrade: "websocket" }),
@@ -411,10 +412,31 @@ test("chat agents refuse cross-site browser requests, locally and hosted", () =>
     agent(
       { Origin: "https://evil.example" },
       "http://localhost:5173/api/customers"
-    ),
-    null,
-    "API reads are left to the API's own check"
+    ).status,
+    403,
+    "cross-site reads would otherwise keep the shared demo active"
   );
+  assert.equal(
+    agent(
+      { Origin: "http://localhost:5173" },
+      "http://localhost:5173/api/customers"
+    ),
+    null
+  );
+  assert.equal(
+    agent({ Origin: "https://evil.example" }, "http://localhost:5173/"),
+    null,
+    "the page itself is static assets"
+  );
+});
+
+test("deploys put the processor up before the app that binds to it", () => {
+  assert.deepEqual(deploySteps(true), ["processor", "main"]);
+  assert.deepEqual(deploySteps(false), [
+    "processor-bootstrap",
+    "main",
+    "processor"
+  ]);
 });
 
 test("the demo API reports status and resets only in hosted demo mode", async (t) => {
@@ -458,8 +480,15 @@ test("the demo API reports status and resets only in hosted demo mode", async (t
   const reset = await call("/api/demo/reset", { method: "POST" });
   assert.deepEqual(await reset.json(), { enabled: true, reset: true });
   assert.deepEqual(resets, [1]);
+
+  // When admitting this request already reset the demo, do not reset again
+  const admittedReset = { ...status, reset: true };
+  const once = await call("/api/demo/reset", { method: "POST" }, admittedReset);
+  assert.deepEqual(await once.json(), admittedReset);
+  assert.deepEqual(resets, [1]);
 });
 
+/** Runs named `ended`, `running`, `missing` and `flaky` fail as their name says. */
 function resetEnv(db, processorStatus = 200) {
   const calls = { terminated: [], processor: [] };
   return {
@@ -467,12 +496,20 @@ function resetEnv(db, processorStatus = 200) {
     DB: db,
     PROCESSOR_TOKEN: "token",
     PAYMENT_WORKFLOW: {
-      get: async (id) => ({
-        terminate: async () => {
-          calls.terminated.push(id);
-          if (id === "finished") throw new Error("already complete");
-        }
-      })
+      get: async (id) => {
+        if (id === "missing") throw new Error("instance.not_found");
+        if (id === "flaky") throw new Error("Workflows API unavailable");
+        return {
+          terminate: async () => {
+            calls.terminated.push(id);
+            if (id === "ended" || id === "running")
+              throw new Error("cannot terminate");
+          },
+          status: async () => ({
+            status: id === "running" ? "running" : "complete"
+          })
+        };
+      }
     },
     PAYMENT_PROCESSOR: {
       fetch: async (req) => {
@@ -505,17 +542,58 @@ test("demo reset stops runs and clears the processor before rebuilding D1 and ch
     "a processor failure leaves D1 untouched"
   );
 
+  // A chat that cannot be cleared fails the reset so it is retried, after
+  // every other chat has been tried
   const env = resetEnv(db);
   const cleared = [];
-  const result = await resetDemo(env, scripts(), async (customerId) => {
-    cleared.push(customerId);
-    if (customerId === "cus_orbit") throw new Error("agent unavailable");
-  });
+  await assert.rejects(
+    resetDemo(env, scripts(), async (customerId) => {
+      cleared.push(customerId);
+      if (customerId === "cus_orbit") throw new Error("agent unavailable");
+    }),
+    /could not clear chats for cus_orbit/
+  );
   assert.deepEqual(env.calls.terminated, ["run-1"]);
   assert.deepEqual(env.calls.processor, ["POST /demo/reset-all"]);
   assert.deepEqual(await dump(db), await dump(fresh));
   assert.deepEqual(cleared.sort(), ["cus_acme", "cus_nimbus", "cus_orbit"]);
-  assert.deepEqual(result.chatClearFailures, ["cus_orbit"]);
+
+  const retry = await resetDemo(resetEnv(db), scripts(), async () => {});
+  assert.equal(retry.customers.length, 3);
+});
+
+test("demo reset fails unless every active run is really over", async (t) => {
+  const db = await database(t);
+  const id = await paidInvoice(db);
+  const own = (workflowId) =>
+    db
+      .prepare(
+        "UPDATE payment_collections SET owner_active = 1, owner_id = 'o', workflow_id = ? WHERE invoice_id = ?"
+      )
+      .bind(workflowId, id)
+      .run();
+  const noChats = async () => {};
+
+  for (const workflowId of ["running", "flaky"]) {
+    await own(workflowId);
+    const env = resetEnv(db);
+    await assert.rejects(resetDemo(env, scripts(), noChats));
+    assert.deepEqual(env.calls.processor, [], `${workflowId}: nothing changed`);
+    assert.equal((await getPaymentCollection(db, id)).status, "paid");
+  }
+  for (const workflowId of ["ended", "missing"]) {
+    const used = await database(t);
+    await paidInvoice(used);
+    await used
+      .prepare(
+        "UPDATE payment_collections SET owner_active = 1, owner_id = 'o', workflow_id = ?"
+      )
+      .bind(workflowId)
+      .run();
+    const env = resetEnv(used);
+    await resetDemo(env, scripts(), noChats);
+    assert.deepEqual(env.calls.processor, ["POST /demo/reset-all"], workflowId);
+  }
 });
 
 test("demo reset bootstraps an empty hosted database", async (t) => {

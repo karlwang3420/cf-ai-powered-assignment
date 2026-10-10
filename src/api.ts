@@ -148,6 +148,8 @@ export async function handleApi(
         return json(demo ?? { enabled: false });
       case "POST demo/:id":
         if (parts[1] !== "reset" || !demo || !env.DEMO_SESSION) break;
+        // Admitting this request may already have reset the demo
+        if (demo.reset) return json(demo);
         return json(await env.DEMO_SESSION.getByName("demo").reset());
       case "GET invoice-runs/:id": {
         let instance: WorkflowInstance;

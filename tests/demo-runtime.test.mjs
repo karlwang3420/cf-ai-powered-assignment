@@ -249,7 +249,14 @@ ${seam}`
       }
     );
     assert.equal(crossSite.status, 403);
-    assert.match(await crossSite.text(), /Cross-origin agent requests/);
+    assert.match(await crossSite.text(), /Cross-origin requests/);
+    const crossSiteRead = await fetch(`${origin}/api/demo`, {
+      headers: {
+        "Cf-Access-Jwt-Assertion": alice,
+        Origin: "https://evil.example"
+      }
+    });
+    assert.equal(crossSiteRead.status, 403, "refused before admission");
     await saveChat(origin, alice, [
       { id: "m1", role: "user", parts: [{ type: "text", text: "hello" }] }
     ]);

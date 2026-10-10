@@ -5,21 +5,21 @@
 //   DEMO_ACCESS_AUD=<application audience tag> npm run deploy:demo
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-process.chdir(fileURLToPath(new URL("..", import.meta.url)));
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAIN = "billing-assistant";
 const PROCESSOR_CONFIG = "dist/mock_payment_processor/wrangler.json";
-const team = process.env.DEMO_ACCESS_TEAM_DOMAIN?.trim();
-const aud = process.env.DEMO_ACCESS_AUD?.trim();
-if (!team || !aud || /[\s:/]/.test(team) || /[\s:]/.test(aud)) {
-  console.error(
-    "Set DEMO_ACCESS_TEAM_DOMAIN (e.g. myteam.cloudflareaccess.com) and\n" +
-      "DEMO_ACCESS_AUD (the Access application's audience tag). Without them\n" +
-      "the deployed app refuses every request. See docs/deploy.md."
-  );
-  process.exit(1);
+
+/**
+ * Each Worker binds to the other, and a binding's target must already exist.
+ * The processor always goes first, so the app's binding to it resolves even
+ * if the processor was deleted. Without the app, the processor first goes up
+ * without its callback binding and is redeployed with it after the app.
+ */
+export function deploySteps(mainExists) {
+  return mainExists
+    ? ["processor", "main"]
+    : ["processor-bootstrap", "main", "processor"];
 }
 
 function run(command, args, { allowFailure = false, quiet = false } = {}) {
@@ -35,33 +35,49 @@ function run(command, args, { allowFailure = false, quiet = false } = {}) {
   return result.status === 0;
 }
 
-run("vite", ["build"]);
+function deploy() {
+  process.chdir(fileURLToPath(new URL("..", import.meta.url)));
+  const team = process.env.DEMO_ACCESS_TEAM_DOMAIN?.trim();
+  const aud = process.env.DEMO_ACCESS_AUD?.trim();
+  if (!team || !aud || /[\s:/]/.test(team) || /[\s:]/.test(aud)) {
+    console.error(
+      "Set DEMO_ACCESS_TEAM_DOMAIN (e.g. myteam.cloudflareaccess.com) and\n" +
+        "DEMO_ACCESS_AUD (the Access application's audience tag). Without them\n" +
+        "the deployed app refuses every request. See docs/deploy.md."
+    );
+    process.exit(1);
+  }
 
-// Each Worker binds to the other, and a binding's target must already exist.
-// On the first deploy the processor goes up once without its callback binding.
-const mainExists = run("wrangler", ["deployments", "list", "--name", MAIN], {
-  allowFailure: true,
-  quiet: true
-});
-if (!mainExists) {
-  const bootstrap = PROCESSOR_CONFIG.replace(".json", ".bootstrap.json");
-  const config = JSON.parse(readFileSync(PROCESSOR_CONFIG, "utf8"));
-  delete config.services;
-  writeFileSync(bootstrap, JSON.stringify(config));
-  run("wrangler", ["deploy", "--config", bootstrap]);
+  run("vite", ["build"]);
+  const mainExists = run("wrangler", ["deployments", "list", "--name", MAIN], {
+    allowFailure: true,
+    quiet: true
+  });
+  for (const step of deploySteps(mainExists)) {
+    if (step === "processor-bootstrap") {
+      const bootstrap = PROCESSOR_CONFIG.replace(".json", ".bootstrap.json");
+      const config = JSON.parse(readFileSync(PROCESSOR_CONFIG, "utf8"));
+      delete config.services;
+      writeFileSync(bootstrap, JSON.stringify(config));
+      run("wrangler", ["deploy", "--config", bootstrap]);
+    } else if (step === "processor") {
+      run("wrangler", ["deploy", "--config", PROCESSOR_CONFIG]);
+    } else {
+      // The vite build redirects this to dist/billing_assistant/wrangler.json
+      run("wrangler", [
+        "deploy",
+        "--var",
+        `DEMO_ACCESS_TEAM_DOMAIN:${team}`,
+        "--var",
+        `DEMO_ACCESS_AUD:${aud}`
+      ]);
+    }
+  }
+
+  console.log(
+    "\nDeployed. The first signed-in request seeds the database. Open the app's\n" +
+      "workers.dev URL; without an Access sign-in every API call returns 403."
+  );
 }
 
-// The vite build redirects this to dist/billing_assistant/wrangler.json
-run("wrangler", [
-  "deploy",
-  "--var",
-  `DEMO_ACCESS_TEAM_DOMAIN:${team}`,
-  "--var",
-  `DEMO_ACCESS_AUD:${aud}`
-]);
-run("wrangler", ["deploy", "--config", PROCESSOR_CONFIG]);
-
-console.log(
-  "\nDeployed. The first signed-in request seeds the database. Open the app's\n" +
-    "workers.dev URL; without an Access sign-in every API call returns 403."
-);
+if (import.meta.url === pathToFileURL(process.argv[1]).href) deploy();

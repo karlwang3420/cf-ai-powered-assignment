@@ -14,7 +14,7 @@ import { handleApi } from "./api";
 import { createBillingTools } from "./assistant-tools";
 import { BillingError, getCustomer } from "./billing/store";
 import { admitDemoRequest } from "./demo/gate";
-import { refuseCrossSiteAgent } from "./origin";
+import { refuseCrossSite } from "./origin";
 import { withDedupedStreamText } from "./workers-ai";
 
 export { DemoSession } from "./demo/demo-session";
@@ -136,7 +136,7 @@ function fixedReply(text: string) {
 export default {
   async fetch(request: Request, env: Env) {
     // First, so a cross-site page cannot use a signed-in reviewer's session
-    const crossSite = refuseCrossSiteAgent(request);
+    const crossSite = refuseCrossSite(request);
     if (crossSite) return crossSite;
     // Hosted demo only: require Access and reseed for a new reviewer first
     const demo = await admitDemoRequest(request, env);
