@@ -1,7 +1,7 @@
 // Optional real styled-app regression, never attaches to an existing browser/profile.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { sleep, until, withBrowser } from "./browser.mjs";
+import { FIRST_LOAD_MS, sleep, until, withBrowser } from "./browser.mjs";
 
 export async function checkPaymentLayout(origin, invoiceId) {
   const ran = await withBrowser(async ({ send, evaluate, responses }) => {
@@ -51,7 +51,8 @@ export async function checkPaymentLayout(origin, invoiceId) {
           evaluate(
             "Array.from(document.querySelectorAll('tbody tr')).some(r=>r.cells[0].textContent==='late')"
           ),
-        "admin collections"
+        "admin collections",
+        FIRST_LOAD_MS
       );
       await evaluate(
         "Array.from(document.querySelectorAll('tbody tr')).find(r=>r.cells[0].textContent==='late').querySelector('button').click()"

@@ -9,6 +9,9 @@ import { spawn } from "node:child_process";
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A test server's first page load also builds its client dependencies. */
+export const FIRST_LOAD_MS = 60_000;
+
 export async function until(read, label, timeout = 20_000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {

@@ -13,11 +13,13 @@ async function ids(db: D1Database, sql: string): Promise<string[]> {
   }
 }
 
-const ENDED = ["complete", "errored", "terminated", "unknown"];
+// Only these states mean the run cannot resume; "unknown" proves nothing
+const ENDED = ["complete", "errored", "terminated"];
 
 /**
  * Stops a collection run. Terminating a run that has already ended fails, so
  * a failure is ignored only for such a run; anything else fails the reset.
+ * A run that was never created makes get() report it as not found.
  */
 async function stopRun(env: PaymentEnv, id: string) {
   let run: WorkflowInstance;

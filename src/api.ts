@@ -147,7 +147,8 @@ export async function handleApi(
       case "GET demo":
         return json(demo ?? { enabled: false });
       case "POST demo/:id":
-        if (parts[1] !== "reset" || !demo || !env.DEMO_SESSION) break;
+        if (parts.length !== 2 || parts[1] !== "reset") break;
+        if (!demo || !env.DEMO_SESSION) break;
         // Admitting this request may already have reset the demo
         if (demo.reset) return json(demo);
         return json(await env.DEMO_SESSION.getByName("demo").reset());

@@ -476,6 +476,11 @@ test("the demo API reports status and resets only in hosted demo mode", async (t
     403
   );
   assert.equal((await call("/api/demo/other", { method: "POST" })).status, 404);
+  assert.equal(
+    (await call("/api/demo/reset/extra", { method: "POST" })).status,
+    404,
+    "only the exact reset path resets"
+  );
   assert.deepEqual(resets, []);
   const reset = await call("/api/demo/reset", { method: "POST" });
   assert.deepEqual(await reset.json(), { enabled: true, reset: true });
@@ -488,7 +493,10 @@ test("the demo API reports status and resets only in hosted demo mode", async (t
   assert.deepEqual(resets, [1]);
 });
 
-/** Runs named `ended`, `running`, `missing` and `flaky` fail as their name says. */
+/**
+ * Runs named `ended`, `running`, `unknown`, `missing` and `flaky` fail as
+ * their name says.
+ */
 function resetEnv(db, processorStatus = 200) {
   const calls = { terminated: [], processor: [] };
   return {
@@ -502,11 +510,11 @@ function resetEnv(db, processorStatus = 200) {
         return {
           terminate: async () => {
             calls.terminated.push(id);
-            if (id === "ended" || id === "running")
+            if (["ended", "running", "unknown"].includes(id))
               throw new Error("cannot terminate");
           },
           status: async () => ({
-            status: id === "running" ? "running" : "complete"
+            status: { running: "running", unknown: "unknown" }[id] ?? "complete"
           })
         };
       }
@@ -574,7 +582,7 @@ test("demo reset fails unless every active run is really over", async (t) => {
       .run();
   const noChats = async () => {};
 
-  for (const workflowId of ["running", "flaky"]) {
+  for (const workflowId of ["running", "unknown", "flaky"]) {
     await own(workflowId);
     const env = resetEnv(db);
     await assert.rejects(resetDemo(env, scripts(), noChats));

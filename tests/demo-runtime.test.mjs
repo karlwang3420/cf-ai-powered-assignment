@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
-import { until, withBrowser } from "./helpers/browser.mjs";
+import { FIRST_LOAD_MS, until, withBrowser } from "./helpers/browser.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -337,7 +337,12 @@ ${seam}`
           `[...document.querySelectorAll("button")].find((b) => b.textContent === ${JSON.stringify(label)}).click()`
         );
       await send("Page.navigate", { url: origin });
-      await until(async () => (await text()).includes("Shared demo"), "banner");
+      // The first load also builds the client dependencies in a fresh cache
+      await until(
+        async () => (await text()).includes("Shared demo"),
+        "banner",
+        FIRST_LOAD_MS
+      );
       assert.match(await text(), /Someone else has used it/);
       assert.doesNotMatch(await text(), /reset since this page loaded/);
 
