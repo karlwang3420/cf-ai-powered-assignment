@@ -187,7 +187,7 @@ npx vite build
 - [Architecture and billing design](docs/architecture.md) — components, AI guardrails, exact money and ledger invariants.
 - [Local testing and CLI](docs/local-testing.md) — isolated demos, recovery scenarios and verification.
 - [Payment Workflow](docs/payment-workflow.md) — payment design and implementation map.
-- [Observability](docs/observability.md) — local Explorer, logs, traces and correlation queries.
+- [Observability](docs/observability.md) — Activity timeline, Workflow instances and Workers Logs in the dashboard, and the local Explorer.
 - [Mock processor](processor/README.md) — processor protocol and standalone development.
 - [Prompt history](docs/prompt-history.md) — how [PROMPTS.md](PROMPTS.md) is recorded.
 

@@ -1,33 +1,91 @@
-# Local payment observability
+# Observability
 
-Verified with Node 24.18.0, Vite 8.1.5, `@cloudflare/vite-plugin` **1.50.0**,
-Wrangler **4.118.0**, plugin Miniflare **5.20260730.0-alpha**, and workerd
-**1.20260730.1**; other versions may differ. Standalone store/CLI tests still use Miniflare 4.20260721.0.
+There are four places to see what happened to a payment. Start with the first;
+it works on both the hosted demo and local dev.
 
-## Explorer
+1. **Activity and Debug tabs** in the app: the durable record.
+2. **Workflow instances** in the Cloudflare dashboard (hosted demo).
+3. **Workers Logs** in the Cloudflare dashboard (hosted demo).
+4. **Local Explorer** under `npm run dev`.
 
-Open <http://localhost:5173/cdn-cgi/local/explorer> while Vite is running.
-`/cdn-cgi/explorer` is an alias on this version. The billing panel links
-to the canonical route. Inspect `payment-workflow` and `invoice-workflow`,
-instances/checkpoints, D1, processor DOs, and **Observability**.
+Whichever you use, money is answered by the invoice's amounts in D1, not by a
+log line or a Workflow status. See [reading the results](#reading-the-results).
 
-The integration test checks the Explorer page title and queries the local trace
-store for payment correlation logs and spans from both Workers. Logs also print as structured JSON in the
-Vite terminal. Local tracing is enabled by the installed plugin's
-`X_LOCAL_OBSERVABILITY` default; explicitly setting it false disables these
-queries. Root Wrangler observability is enabled; hosted traces are not covered
-here.
+## Activity and Debug tabs
 
-The read-only local query endpoint is:
+![Activity tab: an unresolved pending charge goes to review, is declined late, and is paid after a card update](images/payment-activity.png)
 
-```text
-POST /cdn-cgi/local/explorer/api/local/observability/query
-Content-Type: application/json
-{"sql":"SELECT service, name, outcome, trace_id FROM spans LIMIT 20"}
+In **Admin**, click an invoice row. **Activity** is the invoice's timeline,
+stored in D1 next to the money, so it is still there after a Workflow ends or
+logs rotate. The example above is the **Unresolved pending → manual review**
+scenario after **Reset to unpaid**: attempt 1 stays pending through three
+recovery checks 30 seconds apart and goes to review. It is later declined from
+**Mock controls**, needs a newer card, and attempt 2 pays the rest after a
+$5.00 credit.
+
+**Debug** lists each attempt with its idempotency key, processor payment ID
+and card version, plus the Workflow instance ID used below. In local dev it
+also links to the Explorer.
+
+## Workflow instances (hosted)
+
+![payment-workflow instance in the Cloudflare dashboard: completed with status paid after three attempts](images/observability-payment-workflow.png)
+
+In the dashboard, open **Workers & Pages → Workflows → payment-workflow** (or
+`invoice-workflow`) and pick an instance. The instance ID is the **Workflow**
+value in the Debug tab.
+
+- **Input** names the invoice and collection generation. **Output** is the
+  payment state when the run ended, here `"status": "paid"` after 3 attempts.
+- **Step History** reads bottom to top. Steps are grouped in turns
+  (`turn-1-…`, `turn-2-…`): `turn-N-charge-A` charges attempt A, the `sleep`
+  steps are the dunning waits (3, 6 and 9 seconds in the demo), and
+  `release-collection-owner` and `final-payment-state` close the run. A hard
+  decline adds a `card-event` wait; an unknown result adds `recovery` checks.
+
+**Completed** means the run ended, not that the invoice is paid: a run can
+complete with the invoice past due or in review. Read the Output, or the
+invoice itself.
+
+## Workers Logs (hosted)
+
+![billing-assistant Observability tab listing request events](images/observability-events.png)
+
+Open **Workers & Pages → billing-assistant → Observability**. Each request is an
+event, and the UI polls, so `GET /api/payments…` and `DemoSession` calls fill
+the list while a page is open.
+
+To follow one invoice, type its ID, for example `inv_cus_nimbus_2026-09`, in
+the search box. Search is a plain text filter. The payment code logs one JSON
+line per event (`processor_charge`, `payment_collection_started`,
+`payment_collection_finished`, `payment_reconciled`, …) with `invoiceId`,
+`workflowInstanceId`, `attemptId` and `processorPaymentId`. Each line is logged
+as a string, so search its text rather than filtering on those fields. Search
+for an attempt or processor payment ID the same way.
+Credentials, signatures and raw webhook bodies are never logged.
+
+The free plan keeps 200,000 events a day and samples beyond that. Only
+`billing-assistant` has Workers Logs enabled; the mock processor's logs are not
+stored, so watch them live instead.
+
+### Live logs
+
+```sh
+npx wrangler tail billing-assistant --format pretty
+npx wrangler tail mock-payment-processor --format pretty
 ```
 
-Response is `{ success, errors, messages, result: { columns, rows } }`.
-Example correlation query (replace the invoice ID; no secrets required):
+These stream new events only, while the command runs.
+
+## Local Explorer
+
+Open <http://localhost:5173/cdn-cgi/local/explorer> while `npm run dev` is
+running (`/cdn-cgi/explorer` also works). It shows `payment-workflow` and
+`invoice-workflow` instances with their checkpoints, D1, the processor's
+Durable Objects, and **Observability** with logs and traces from both Workers.
+Logs also print as JSON in the Vite terminal.
+
+Local logs and traces can be queried with read-only SQL:
 
 ```sh
 curl http://localhost:5173/cdn-cgi/local/explorer/api/local/observability/query \
@@ -35,41 +93,33 @@ curl http://localhost:5173/cdn-cgi/local/explorer/api/local/observability/query 
   -d '{"sql":"SELECT ts_ms, level, message, trace_id FROM logs WHERE message LIKE ? ORDER BY ts_ms DESC LIMIT 30","params":["%inv_cus_acme_2026-09%"]}'
 ```
 
-`logs.message` is a JSON console-argument array containing the structured
-payment log. Use its `trace_id` to query `spans`. Span attributes are SQLite
-JSONB; select `json(attributes)` to read them. The endpoint only accepts a
-single read-only SELECT/WITH, with a 10,000-row cap. Other Explorer resource
-endpoints **can mutate** data, so keep Explorer on loopback. Its D1 raw-query
-“batch” currently runs statements separately; it is not financial transaction
-tooling and must not be used to emulate application `db.batch()`.
+The response is `{ success, errors, messages, result: { columns, rows } }`.
+`logs.message` is a JSON array of the console arguments; use its `trace_id` to
+query `spans`, and `json(attributes)` to read span attributes. The endpoint
+accepts a single `SELECT`/`WITH` and returns at most 10,000 rows.
 
-## Correlation and durable truth
+Other Explorer endpoints **can change data**, so keep dev on loopback. Its D1
+"batch" runs statements one by one; it is not a substitute for the app's atomic
+`db.batch()`.
 
-Payment events such as `processor_charge`, `payment_reconciled`,
-`payment_collection_started` and `payment_collection_finished` carry available
-`invoiceId`, `workflowInstanceId`, `attemptId`, `processorPaymentId`, plus safe
-status/result/check fields. Credentials, signatures and raw webhook bodies
-are not logged. Processor outbox event IDs correlate with durable merchant
-receipt; application and Workflow notification are separate states.
+Verified with Node 24.18.0, Vite 8.1.5, `@cloudflare/vite-plugin` 1.50.0,
+Wrangler 4.118.0 and workerd 1.20260730.1; other versions may differ. The
+integration test checks the Explorer page and queries local logs and spans from
+both Workers.
 
-In the admin view (`/admin`), open an invoice and use its **Debug** tab to
-inspect ordered attempts, stable keys, generation/owner/run and method versions;
-**Activity** shows durable notices.
-The timeline remains in merchant D1 even when terminal logs rotate or a Workflow
-ends. **Needs attention** includes unresolved reservations, action-required,
-positive past-due/conflicts, and actual unapplied merchant inbox events.
+## Reading the results
 
-Financial state, not telemetry, answers whether money was posted:
+- A completed Workflow can mean past due or in review, not paid.
+- A pending result that was applied correctly still shows as an **unresolved**
+  processor check in **Reconcile**, even with no ledger issues.
+- An applied check can be a confirmed **decline**. Read the invoice's status
+  and attempts, not just the check result.
+- A late signed success can move an invoice from review to paid after its
+  Workflow ended; the Workflow's Output keeps saying review.
+- To recover unresolved money, use **Reconcile** or
+  `npm run billing -- reconcile-payments`, not raw SQL or a new key.
 
-- Workflow `complete` can mean needs-review or past-due, not paid.
-- A successfully applied pending observation is reported as an **unresolved**
-  processor check, even if internal ledger issues are empty.
-- Applied/duplicate terminal checks can mean a confirmed **decline**, not just
-  success; read the current financial status and attempt state.
-- Late signed success can move needs-review to paid without changing the old
-  Workflow's needs-review output.
-- Use **Reconcile payments** or `billing reconcile-payments`, not raw SQL,
-  force-release or a fresh key, to recover unresolved money.
+**Needs attention** in Admin counts unresolved holds, invoices waiting for a
+card, past-due or conflicting invoices, and unapplied webhooks.
 
-Local traces/logs are developer diagnostics, not an authenticated audit export
-or production retention guarantee.
+Logs and traces are diagnostics, not an audit export or a retention guarantee.
