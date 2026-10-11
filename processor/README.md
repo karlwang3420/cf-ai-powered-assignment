@@ -7,7 +7,7 @@ or mutates merchant records. Public demo credentials below are not real secrets.
 
 ## Local startup
 
-For the complete demo, follow the [root setup instructions](../README.md#setup).
+For the complete demo, follow the [root setup instructions](../README.md#local-setup).
 From the repository root:
 
 ```sh
