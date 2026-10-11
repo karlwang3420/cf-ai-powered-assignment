@@ -596,3 +596,19 @@
 
 > [17:27:38 (UTC-04:00)] commit and make a pr. ask for codex review
 
+> [17:41:01 (UTC-04:00)] check review
+
+> [17:41:44 (UTC-04:00)] ok, merge and deploy
+
+> [19:53:50 (UTC-04:00)] update readme to show the new login/test instruction
+
+> [20:06:46 (UTC-04:00)] what can you improve on the manual/guide part?
+
+> [20:08:03 (UTC-04:00)] go ahead
+
+> [20:24:53 (UTC-04:00)] what's this Workflow Explorer link
+
+> [20:28:32 (UTC-04:00)] yes, and new screenshots. but i don't want an table, i rather have the explaintion on the UI. tooltip or otherwise
+
+> [20:44:03 (UTC-04:00)] yes
+

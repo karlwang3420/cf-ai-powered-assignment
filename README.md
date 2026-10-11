@@ -18,10 +18,19 @@ not the model.
 
 ## Hosted demo
 
-**Link:** _added after deployment_
+**Link:** <https://billing-assistant.karlwang3420.workers.dev>
 
-The hosted demo needs no setup: open the link and sign in with your email
-(Cloudflare Access sends a one-time code).
+The hosted demo needs no setup. To sign in:
+
+1. Open the link. Cloudflare Access shows its login page.
+2. Enter your **@cloudflare.com** email and click **Send login code**. Other
+   addresses are not allowed and get no email, although the page still says one
+   was sent.
+3. Paste the one-time code from the email (it comes from
+   `noreply@notify.cloudflare.com` and expires after 10 minutes).
+
+The app opens with the seeded customers and a **Shared demo** banner. Follow the
+[quick manual](#quick-manual) below to test it.
 
 **The demo is shared.** Everyone who signs in sees and changes the same data.
 It returns to the seed when someone new signs in after 15 minutes without
@@ -61,19 +70,48 @@ if you want to run without remote bindings.
 
 ## Quick manual
 
+Start with the five-minute check below; the sections after it explain each
+screen. Seeded customers have usage for August and September 2026 but no
+invoices yet, so begin in **Admin**.
+
+### Five-minute check
+
+1. **Invoice two months.** Open **Admin**, choose **Nimbus Labs**, and click
+   **Run invoice** for August, then September. Expect **$200.00** and
+   **$330.00**, each "finalized, not collected yet". Close the payment dialog
+   that opens; nothing is charged yet.
+2. **Ask about the change.** Switch to the customer view, choose **Nimbus
+   Labs**, and send the suggested question _Why did my bill change from August
+   2026 to September 2026?_ The answer should attribute the $130.00 increase to
+   Workers AI overage ($126.00, from a spike on September 15–20) plus $4.00 of
+   extra requests.
+3. **Approve a credit.** Ask for a credit on the September invoice, for example
+   _Please credit $20 on my September invoice for the outage._ Click
+   **Approve**. September now shows a **−$20.00** credit.
+4. **Recover a declined payment.** In **Admin**, click the Nimbus September row.
+   On **Mock controls**, choose **Hard decline → success (update card)**, then
+   click **Collect**. The status becomes **Waiting for a newer card**. Within
+   30 seconds, click **Simulate card update**. Expect **Paid in full**, **Due
+   $0.00** and 2 of 4 attempts used.
+5. **See what happened.** The **Activity** tab lists the decline, the card
+   update and the payment.
+
 ### 1. Check a customer's bill and ask the assistant
 
 ![Customer view with customer selector, expanded invoice, card update and chat input](docs/images/customer-billing.png)
 
 - **Customer selector** switches the account and its separate chat history.
-- **Invoice month** expands a Service / Total usage / Total cost table and approved
-  credits. Usage tiers are combined per service; the plan fee stays separate. Paid, Processing
-  and Due show where the balance stands; **Refresh** reloads billing data.
+- **Invoice month** lists invoices run in Admin; until then the view says
+  **No invoices yet** and shows only this month's usage so far. A month expands
+  to a Service / Total usage / Total cost table and approved credits. Usage tiers
+  are combined per service; the plan fee stays separate. Paid, Processing and
+  Due show where the balance stands; **Refresh** reloads billing data.
 - **Chat** accepts a suggested question or your own message. Press **Enter** to
   send, **Shift+Enter** for a new line, or the stop button to stop generation.
-- **Approve / Reject** appears when the assistant proposes a credit. Nothing is
-  credited without approval; paid or reserved amounts cannot also be credited.
-  Use an unpaid, uncollected invoice to try this.
+- **Approve / Reject** appears when you ask for a credit and the assistant
+  proposes one. Nothing is credited without approval. Credits apply only to an
+  invoiced month, and only to the part not yet paid or held for a charge, so ask
+  before collecting.
 - **Update card** simulates a new payment method—no card details are collected.
   The bug toggle shows chat debug data; **Clear chat** removes this account's
   conversation, not its billing records.
@@ -94,12 +132,15 @@ new collection runs.
 
 ### 3. Try payment failures and recovery
 
-![Invoice payment dialog showing Collect, reconciliation actions, mock scenario and simulated card update](docs/images/payment-controls.png)
+![Invoice payment dialog showing Collect, reconciliation actions, a mock scenario with its explanation, and simulated card update](docs/images/payment-controls.png)
 
 1. Run an invoice (or open an uncollected one) and choose a scenario in **Mock
-   controls**. It applies immediately to future attempts, not past ones.
+   controls**. The text under the list says what will happen and what to do.
+   It applies immediately to future attempts, not past ones.
 2. Click **Collect**. For **Hard decline → success**, click **Simulate card
-   update** while the Workflow waits for a newer card.
+   update** within 30 seconds, while the Workflow waits for a newer card. If
+   you miss it, the invoice becomes **Past due**: update the card, then click
+   **Reconcile + resume**.
 3. **Reconcile** checks original processor keys and unapplied webhooks.
    **Reconcile + resume** also permits a new collection run and may charge the
    remaining mock balance. Neither goes past the four automatic attempts.
@@ -108,37 +149,29 @@ new collection runs.
    outcome in Mock controls first. A hard decline needs **Simulate card update**
    before retrying.
 
-**Mock controls** show the mock processor's own state beside the invoice's:
-the queue of outcomes for its next charges, and each charge it holds with its
-state and webhook deliveries. Each charge offers only the actions the
-processor's [state model](processor/README.md#state-model) allows:
-
-| Charge state | Actions                                            |
-| ------------ | -------------------------------------------------- |
-| Pending      | Succeeds, Soft decline, Hard decline, Send webhook |
-| Declined     | Succeeds (a late success), Send webhook            |
-| Succeeded    | Send webhook                                       |
-
-Every state change sends a signed webhook, and **Send webhook** sends a new
-event for the current state. A dropped (lost-webhook) or given-up delivery can
-be delivered again. The processor never looks at billing data; the billing side
-decides what each webhook means. A late success after four soft declines pays
-the invoice without a new charge. If it is not safe, for example because a
-newer attempt is already charging, the invoice shows a conflict instead.
-**Held** means the processor result is unresolved, not failed. See the [payment walkthrough](docs/local-testing.md#payment-walkthrough) for
-timing, retry limits and more scenarios.
+**Mock controls** also show the mock processor's side: its latest charge for
+this invoice, with a button for each state that charge can still move to. Hover
+a button to see what it does. A declined charge can still **Succeed** (a late
+success, with no new charge), and each change sends the billing side a signed
+webhook. **Held** means a processor result is unresolved, not failed.
+The [payment walkthrough](docs/local-testing.md#payment-walkthrough) covers
+every scenario, timing and retry limits; the
+[processor state model](processor/README.md#state-model) covers webhook
+delivery.
 
 ### 4. Inspect what happened
 
 ![Debug tab showing a hard decline followed by a successful payment after a card update](docs/images/payment-debug.png)
 
 **Activity** shows the durable event timeline. **Debug** shows Workflow status,
-attempts, idempotency keys and processor IDs, with a link to **Workflow Explorer**.
-Check the money totals—not just Workflow completion—to confirm payment.
+attempts, idempotency keys and processor IDs. In local dev it also links to
+**Workflow Explorer**, which the hosted demo does not have. Check the money totals—not
+just Workflow completion—to confirm payment.
 
 **Reset to unpaid** is destructive demo tooling: after confirmation it clears
 that invoice's payment history and reopens collection; credits stay. Use it only
-when deliberately restarting a demo scenario.
+when deliberately restarting a demo scenario. On the hosted demo it changes the
+invoice for everyone.
 
 ## Checks
 

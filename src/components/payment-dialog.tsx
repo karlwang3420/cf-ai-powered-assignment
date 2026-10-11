@@ -35,29 +35,66 @@ import {
   pollPaymentRead
 } from "./payment-state";
 
-const scenarios: { label: string; values: ProcessorScenario[] }[] = [
-  { label: "Default (success)", values: [] },
-  { label: "Soft decline → success", values: ["soft_decline", "success"] },
+/** Presets for the processor's queue, each with what Collect will then do. */
+const scenarios: {
+  label: string;
+  values: ProcessorScenario[];
+  hint: string;
+}[] = [
+  {
+    label: "Default (success)",
+    values: [],
+    hint: "The first charge succeeds."
+  },
+  {
+    label: "Soft decline → success",
+    values: ["soft_decline", "success"],
+    hint: "The first charge is declined for a temporary reason. The Workflow retries by itself after 3 seconds, and the retry succeeds."
+  },
   {
     label: "Hard decline → success (update card)",
-    values: ["hard_decline", "success"]
+    values: ["hard_decline", "success"],
+    hint: "The first charge is declined until the card changes. Click Simulate card update within 30 seconds; the next charge succeeds."
   },
-  { label: "Outage → same-key recovery", values: ["outage"] },
-  { label: "Success with lost response", values: ["lost_response"] },
-  { label: "Pending → webhook", values: ["pending"] },
-  { label: "Lost webhook → status lookup", values: ["lost_webhook"] },
-  { label: "Duplicate webhook", values: ["duplicate_webhook"] },
+  {
+    label: "Outage → same-key recovery",
+    values: ["outage"],
+    hint: "The processor fails before charging. The Workflow retries with the same idempotency key, so the card is charged once."
+  },
+  {
+    label: "Success with lost response",
+    values: ["lost_response"],
+    hint: "The charge succeeds but its reply is lost. The Workflow retries with the same key and gets the original charge back instead of a second one."
+  },
+  {
+    label: "Pending → webhook",
+    values: ["pending"],
+    hint: "The charge starts pending. The processor approves it after 2 seconds, and its webhook pays the invoice."
+  },
+  {
+    label: "Lost webhook → status lookup",
+    values: ["lost_webhook"],
+    hint: "The charge succeeds but its webhook is never delivered. The invoice is paid from the charge result anyway."
+  },
+  {
+    label: "Duplicate webhook",
+    values: ["duplicate_webhook"],
+    hint: "The charge succeeds and its webhook arrives twice. The copy is ignored, so the payment is recorded once."
+  },
   {
     label: "Unresolved pending → manual review",
-    values: ["unresolved_pending"]
+    values: ["unresolved_pending"],
+    hint: "The charge stays pending. After three 30-second checks the invoice goes to review with the amount held. Settle it with the buttons below."
   },
   {
     label: "Four soft declines (budget exhausted)",
-    values: Array<ProcessorScenario>(4).fill("soft_decline")
+    values: Array<ProcessorScenario>(4).fill("soft_decline"),
+    hint: "All four automatic attempts are declined, 3, 6 and 9 seconds apart. The invoice becomes past due; choose an outcome, then click Retry payment."
   },
   {
     label: "Four hard declines (four-attempt limit)",
-    values: Array<ProcessorScenario>(4).fill("hard_decline")
+    values: Array<ProcessorScenario>(4).fill("hard_decline"),
+    hint: "Every charge is declined until the card changes. Update the card after each decline; after four attempts the invoice is past due."
   }
 ];
 
@@ -309,14 +346,17 @@ function DebugTab({
           </Row>
         </dl>
       ))}
-      <a
-        href="/cdn-cgi/local/explorer"
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex items-center gap-1 underline text-kumo-default"
-      >
-        Workflow Explorer <ArrowSquareOutIcon size="0.75rem" />
-      </a>
+      {/* The Explorer is served by the Vite dev server; deployed Workers have none */}
+      {import.meta.env.DEV && (
+        <a
+          href="/cdn-cgi/local/explorer"
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 underline text-kumo-default"
+        >
+          Workflow Explorer <ArrowSquareOutIcon size="0.75rem" />
+        </a>
+      )}
     </div>
   );
 }
@@ -327,6 +367,16 @@ const actionLabel: Record<ChargeState, string> = {
   soft_decline: "Soft decline",
   hard_decline: "Hard decline"
 };
+
+/** What each button does to the charge, from its current state. */
+const actionHint = (pending: boolean, to: ChargeState) =>
+  to === "succeeded"
+    ? pending
+      ? "The processor approves this charge and sends its webhook."
+      : "Late success: this declined charge goes through after all, with no new charge. If a newer attempt is already charging, the invoice shows a conflict."
+    : to === "soft_decline"
+      ? "Temporary decline: the Workflow may retry."
+      : "Decline that needs a newer card before another attempt.";
 
 /** Existing outcome controls, using the latest charge's allowed transitions. */
 function MockPaymentControl({
@@ -377,6 +427,7 @@ function MockPaymentControl({
               size="sm"
               variant="secondary"
               disabled={disabled}
+              title={actionHint(current.state === "pending", outcome)}
               onClick={() =>
                 onAction("Settling", async () => {
                   const r = await api.decideCharge(
@@ -714,6 +765,11 @@ export function PaymentDialog({
                         </option>
                       ))}
                     </select>
+                    {queueIndex(queue) >= 0 && (
+                      <span className="block text-kumo-subtle">
+                        {scenarios[queueIndex(queue)].hint}
+                      </span>
+                    )}
                   </label>
                   <MockPaymentControl
                     processor={processor}

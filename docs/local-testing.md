@@ -121,8 +121,8 @@ invoice is $11.76; immutable replay returns the same invoice.
    customer view at `/` stays read-only.
 2. In **Mock controls**, choose a preset. It is sent to the processor
    immediately and affects future new keys only, not historical attempts. The
-   tab shows only the controls that apply to the current outcome (see the
-   table in the [README](../README.md#3-try-payment-failures-and-recovery)).
+   text under the list explains the chosen preset, and the tab shows only the
+   controls that apply to the current outcome.
 3. **Collect** starts/reuses the bounded generation. It is not a
    force-retry. Inspect authoritative paid/reserved/due/creditable amounts and
    `n of 4` attempts; reserved money is still unresolved, not failed.
@@ -148,12 +148,14 @@ manual`), charged at once without a dunning wait; if it declines, the
    (Succeeds / Soft decline / Hard decline) and the processor sends its signed
    webhook. Succeeds moves needs review to paid; a soft decline releases the
    hold so Collect works again.
-8. Mock controls list every processor charge with the actions its state model
-   allows ([processor state model](../processor/README.md#state-model)). After a
-   decline, **Succeeds** is a late success: the same payment ID, posted once
-   with no new charge, or a conflict if a newer attempt or a credit makes it
-   unsafe. **Send webhook** sends a new event for the current state; a dropped
-   or given-up delivery can be delivered again with its original event ID.
+8. Mock controls show the processor's latest charge for the invoice with the
+   outcomes its state model allows
+   ([processor state model](../processor/README.md#state-model)); hover a
+   button for what it does. After a decline, **Succeeds** is a late success:
+   the same payment ID, posted once with no new charge, or a conflict if a
+   newer attempt or a credit makes it unsafe. Sending a new event or
+   redelivering a dropped one is API-only:
+   `POST /api/payments/<invoice>/processor/notify` and `.../deliver`.
 9. Use the **Activity** and **Debug** tabs for timeline, immutable keys, method versions, processor IDs,
    notices, deadlines and Workflow IDs. Continue polling financial state:
    Workflow completion alone is not payment proof.

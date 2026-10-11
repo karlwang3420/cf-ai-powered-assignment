@@ -129,7 +129,11 @@ test(
       format: "esm",
       platform: "browser",
       jsx: "automatic",
-      define: { "process.env.NODE_ENV": '"development"' }
+      // As the Vite dev server would; the components read Vite's env
+      define: {
+        "process.env.NODE_ENV": '"development"',
+        "import.meta.env.DEV": "true"
+      }
     });
     let payment = { ...base };
     let inbox = [];
@@ -545,6 +549,8 @@ test(
     // Choosing a scenario applies it immediately; there is no separate save.
     await waitText("Mock queue set: lost response");
     await waitText("Mock: next outcome lost response");
+    // The chosen preset explains itself under the list
+    await waitText("The charge succeeds but its reply is lost.");
     assert.deepEqual(queued, ["lost_response"]);
     await click("Collect");
     await waitText("1 of 4 used");
